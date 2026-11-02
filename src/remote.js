@@ -36,19 +36,58 @@ async function unseal(k, s) {
   const u = unb64(s)
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.subarray(0, 12) }, k, u.subarray(12)))
 }
+export const b64u = (u8) => b64(u8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+export const unb64u = (s) => unb64(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4))
+
+/* ---------- write permission (ECDSA P-256) ----------
+ * Edit links carry the private key (sk), view links only the public key (pk).
+ * Every change is signed; the sync server and peers drop changes without a valid signature. */
+const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' }
+const SIG = { name: 'ECDSA', hash: 'SHA-256' }
+export async function generateWriteKeys() {
+  const kp = await crypto.subtle.generateKey(ECDSA, true, ['sign', 'verify'])
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))
+  const jwk = await crypto.subtle.exportKey('jwk', kp.privateKey)
+  return { pk: b64u(raw), sk: jwk.d }
+}
+/** Returns null (workspace without permissions) or { pk, canWrite, sign(bytes), verify(sig, bytes) }. */
+export async function loadSigner(pk, sk) {
+  if (!pk) return null
+  const raw = unb64u(pk)
+  const verifyKey = await crypto.subtle.importKey('raw', raw, ECDSA, false, ['verify'])
+  const verify = async (sig, bytes) => { try { return await crypto.subtle.verify(SIG, verifyKey, sig, bytes) } catch { return false } }
+  let signKey = null
+  if (sk) {
+    try {
+      signKey = await crypto.subtle.importKey('jwk',
+        { kty: 'EC', crv: 'P-256', d: sk, x: b64u(raw.slice(1, 33)), y: b64u(raw.slice(33, 65)), ext: true }, ECDSA, false, ['sign'])
+      const probe = te.encode('peerpad-probe')
+      if (!(await verify(new Uint8Array(await crypto.subtle.sign(SIG, signKey, probe)), probe))) signKey = null
+    } catch { signKey = null }
+  }
+  return {
+    pk,
+    canWrite: !!signKey,
+    sign: async (bytes) => new Uint8Array(await crypto.subtle.sign(SIG, signKey, bytes)),
+    verify,
+  }
+}
+
 async function roomHash(ws, key) {
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(`peerpad-room:${ws}:${key}`)))
   return [...d].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 /**
- * hooks: { emit, onReady, onPresence(tab, p), onLeave(tab), onDisconnect }
+ * hooks: { emit, onReady, onPresence(tab, p), onLeave(tab), onDisconnect, onSigner(signer) }
+ * signer: from loadSigner(), or null for a workspace without view-only links.
  * Returns { state, whenReady(), sendUpdate(u) -> Promise (resolves when the server stored it),
  *           sendPresence(p), close() }
  */
-export function serverTransport(doc, ws, key, url, tabId, hooks = {}) {
-  const h = { emit() {}, onReady() {}, onPresence() {}, onLeave() {}, onDisconnect() {}, ...hooks }
-  const st = { status: 'connecting', error: null, everReady: false }
+export function serverTransport(doc, ws, key, url, tabId, hooks = {}, signer = null) {
+  const h = { emit() {}, onReady() {}, onPresence() {}, onLeave() {}, onDisconnect() {}, onSigner() {}, ...hooks }
+  const st = { status: 'connecting', error: null, everReady: false, readOnly: !!signer && !signer.canWrite }
+  const signData = async (data) => (signer?.canWrite ? b64u(await signer.sign(te.encode(data))) : undefined)
   let sock = null, k = null, room = null, ready = false, retry = 1000, lastSeq = 0, closed = false
   let acks = [] // resolvers for updates waiting for the server's ack (acks arrive in send order)
   let readyWaiters = []
@@ -93,6 +132,17 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}) {
           st.status = 'error'; st.error = 'Could not decrypt this workspace. Check the invite link.'; h.emit(); return
         }
         lastSeq = m.seq
+        // Permissions: the server remembers the workspace's public key.
+        if (m.pub && signer && m.pub !== signer.pk) {
+          st.status = 'error'; st.error = 'This link does not match the workspace. Ask for a new invite link.'; h.emit(); return
+        }
+        if (m.pub && !signer) {
+          // An old link opening an upgraded workspace: it can still read, but no longer edit.
+          signer = await loadSigner(m.pub)
+          h.onSigner(signer)
+        }
+        if (signer && !m.pub && signer.canWrite) sendJSON({ t: 'claim', pub: signer.pk })
+        st.readOnly = !!signer && !signer.canWrite
         doc.transact(() => {
           for (const u of updates) { Y.applyUpdate(shadow, u); Y.applyUpdate(doc, u, 'srv') }
         }, 'srv')
@@ -100,9 +150,12 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}) {
         const missing = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(shadow))
         ready = true
         st.status = 'connected'; st.error = null; st.everReady = true
-        if (missing.length > 2) sendUpdate(missing)
+        if (missing.length > 2 && !st.readOnly) sendUpdate(missing).catch(() => {})
         // keep the server log small: replace history with one encrypted snapshot
-        if (m.entries.length > 50) enqueue(async () => sendJSON({ t: 'compact', upTo: lastSeq, data: await seal(k, Y.encodeStateAsUpdate(doc)) }))
+        if (m.entries.length > 50 && !st.readOnly) enqueue(async () => {
+          const data = await seal(k, Y.encodeStateAsUpdate(doc))
+          sendJSON({ t: 'compact', upTo: lastSeq, data, sig: await signData(data) })
+        })
         readyWaiters.forEach((f) => f()); readyWaiters = []
         h.onReady()
         h.emit()
@@ -116,9 +169,12 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}) {
         try { h.onPresence(m.tab, JSON.parse(td.decode(await unseal(k, m.data)))) } catch {}
       } else if (m.t === 'leave') {
         h.onLeave(m.tab)
+      } else if (m.t === 'pub') {
+        // the workspace was just upgraded by an editor
+        if (!signer) { signer = await loadSigner(m.pub); st.readOnly = !signer.canWrite; h.onSigner(signer); h.emit() }
       } else if (m.t === 'error') {
-        st.error = m.error
-        acks.shift()?.reject(new Error(m.error))
+        if (m.for === 'up') acks.shift()?.reject(new Error(m.error))
+        else st.error = m.error
         h.emit()
       }
     }
@@ -136,13 +192,15 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}) {
     }
   }
   function sendUpdate(u) {
+    if (st.readOnly) return Promise.reject(new Error('This link is view-only.'))
     if (!ready) return Promise.reject(new Error('Not connected to the sync server.'))
     return new Promise((resolve, reject) => {
       enqueue(async () => {
         const data = await seal(k, u)
+        const sig = await signData(data)
         if (!ready || sock?.readyState !== 1) return reject(new Error('Not connected to the sync server.'))
         acks.push({ resolve, reject })
-        sock.send(JSON.stringify({ t: 'up', data }))
+        sock.send(JSON.stringify({ t: 'up', data, sig }))
       })
     })
   }

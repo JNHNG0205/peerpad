@@ -13,7 +13,7 @@ import * as Y from 'yjs'
 import * as z from 'zod/v4'
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
-import { serverTransport, newTabId } from '../src/remote.js'
+import { serverTransport, newTabId, loadSigner } from '../src/remote.js'
 
 const CHARACTER_LIMIT = 25000
 const log = (...a) => console.error('[peerpad-mcp]', ...a) // stdout carries the protocol
@@ -28,7 +28,7 @@ function parseInvite(link) {
   if (!ws || !key) throw new Error('PEERPAD_INVITE is missing ws= or key=. Copy a fresh link from the Share button.')
   const server = p.get('srv') || (u.protocol.startsWith('http') ? (u.origin + u.pathname).replace(/\/(index\.html)?$/, '') : null)
   if (!server) throw new Error('The invite link has no sync server. Set one in PeerPad (workspace menu → Sync server…) and copy a new link.')
-  return { ws, key, server }
+  return { ws, key, server, pk: p.get('pk'), sk: p.get('sk') }
 }
 const cfg = parseInvite(process.env.PEERPAD_INVITE)
 const AI_NAME = process.env.PEERPAD_AI_NAME || 'AI assistant'
@@ -39,13 +39,15 @@ const doc = new Y.Doc()
 const pages = doc.getMap('pages')
 const meta = doc.getMap('meta')
 const tab = newTabId()
+const signer = await loadSigner(cfg.pk, cfg.sk)
+if (signer && !signer.canWrite) log('view-only link: write tools will refuse changes')
 const remote = serverTransport(doc, cfg.ws, cfg.key, cfg.server, tab, {
-  onReady: () => log('connected to', cfg.server),
+  onReady: () => log('connected to', cfg.server, remote.state.readOnly ? '(view only)' : ''),
   onDisconnect: () => log('disconnected, retrying…'),
-})
+}, signer)
 
 let activePage = null, lastActive = 0
-const presence = () => ({ name: AI_NAME, color: AI_COLOR, page: activePage, block: null, tab })
+const presence = () => ({ name: AI_NAME, color: AI_COLOR, page: activePage, block: null, tab, role: remote.state.readOnly ? 'view' : 'edit' })
 setInterval(() => { if (Date.now() - lastActive < 30000) remote.sendPresence(presence()) }, 8000).unref?.()
 
 async function ready() {
@@ -54,6 +56,7 @@ async function ready() {
 /** Run edits in one transaction and wait until the sync server has stored them. */
 async function write(fn, pageId = null) {
   await ready()
+  if (remote.state.readOnly) throw new Error('PEERPAD_INVITE is a view-only link, so changes are not allowed. Put a "Can edit" link (Share button in PeerPad) in PEERPAD_INVITE to let the AI edit.')
   const updates = []
   const onUpdate = (u, origin) => { if (origin === 'mcp') updates.push(u) }
   doc.on('update', onUpdate)

@@ -7,7 +7,8 @@
 //  - IndexedDB = offline copy, so the workspace survives reloads and works offline
 import * as Y from 'yjs'
 import { joinRoom } from 'trystero/nostr'
-import { serverTransport, newTabId } from './remote.js'
+import { serverTransport, newTabId, loadSigner } from './remote.js'
+export { generateWriteKeys, loadSigner } from './remote.js'
 
 const APP_ID = 'peerpad-p2p-workspace-v1'
 const tabId = newTabId()
@@ -45,7 +46,7 @@ function saveLocal(doc, ws) {
  * Connects doc to peers. Returns { peers: Map, setPresence(obj), status(), onChange(fn) }
  * peers: tabId -> { name, color, page, block, ts, via }
  */
-export function connect(doc, ws, key, serverUrl = null) {
+export function connect(doc, ws, key, serverUrl = null, signer = null) {
   const peers = new Map()
   const listeners = new Set()
   let presence = { tab: tabId }
@@ -82,16 +83,39 @@ export function connect(doc, ws, key, serverUrl = null) {
     addEventListener('pagehide', () => bc.postMessage({ t: 'bye', tab: tabId }))
   }
 
+  const readOnly = () => !!signer && !signer.canWrite
+
   // ---- sync server
   const srv = serverUrl
     ? serverTransport(doc, ws, key, serverUrl, tabId, {
         emit,
+        onSigner: (s) => { signer = s; emit() },
         onReady: () => srv.sendPresence(presence),
         onPresence: (tab, p) => setPeer(tab, p, 'srv'),
         onLeave: (tab) => { if (peers.get(tab)?.via === 'srv') { peers.delete(tab); emit() } },
         onDisconnect: () => { for (const [t, p] of peers) if (p.via === 'srv') peers.delete(t) },
-      })
+      }, signer)
     : null
+
+  // P2P packets: [64-byte signature][Yjs update] when the workspace has view-only links.
+  // Viewers cannot sign, so they never send changes; everyone drops unsigned changes.
+  async function p2pSend(u, opts) {
+    if (!aUp) return
+    if (!signer) return aUp.send(u, opts).catch(() => {})
+    if (!signer.canWrite) return
+    const sig = await signer.sign(u)
+    const pkt = new Uint8Array(64 + u.length)
+    pkt.set(sig); pkt.set(u, 64)
+    aUp.send(pkt, opts).catch(() => {})
+  }
+  async function p2pReceive(data) {
+    const pkt = new Uint8Array(data)
+    try {
+      if (!signer) return Y.applyUpdate(doc, pkt, 'p2p')
+      const sig = pkt.subarray(0, 64), u = pkt.subarray(64)
+      if (await signer.verify(sig, u)) Y.applyUpdate(doc, u, 'p2p')
+    } catch { /* malformed or from an older version */ }
+  }
 
   // ---- WebRTC peers
   const p2pTabs = new Map() // trystero peerId -> tabId
@@ -118,9 +142,8 @@ export function connect(doc, ws, key, serverUrl = null) {
       emit()
     }
     // Peer tells us what it has -> we send exactly what it is missing.
-    aSv.onMessage = (sv, { peerId }) =>
-      aUp.send(Y.encodeStateAsUpdate(doc, new Uint8Array(sv)), { target: peerId })
-    aUp.onMessage = (u) => Y.applyUpdate(doc, new Uint8Array(u), 'p2p')
+    aSv.onMessage = (sv, { peerId }) => p2pSend(Y.encodeStateAsUpdate(doc, new Uint8Array(sv)), { target: peerId })
+    aUp.onMessage = (u) => p2pReceive(u)
     aPres.onMessage = (p, { peerId }) => {
       p2pTabs.set(peerId, p.tab)
       setPeer(p.tab, p, 'p2p')
@@ -132,9 +155,9 @@ export function connect(doc, ws, key, serverUrl = null) {
   // Relay every change to the transports it did not come from.
   // Yjs ignores updates it already has, so this can never loop.
   doc.on('update', (u, origin) => {
-    if (origin !== 'p2p' && aUp && p2pCount) aUp.send(u).catch(() => {})
+    if (origin !== 'p2p' && aUp && p2pCount) p2pSend(u)
     if (origin !== 'bc' && bc) bc.postMessage({ t: 'up', u })
-    if (origin !== 'srv' && srv && srv.state.status === 'connected') srv.sendUpdate(u).catch(() => {})
+    if (origin !== 'srv' && srv && srv.state.status === 'connected' && !readOnly()) srv.sendUpdate(u).catch(() => {})
     scheduleSave()
   })
 
@@ -160,7 +183,7 @@ export function connect(doc, ws, key, serverUrl = null) {
       presence = { ...p, tab: tabId }
       broadcastPresence()
     },
-    status: () => ({ p2p: p2pCount, error: relayError, server: srv ? srv.state.status : null, serverError: srv?.state.error }),
+    status: () => ({ p2p: p2pCount, error: relayError, server: srv ? srv.state.status : null, serverError: srv?.state.error, readOnly: readOnly() }),
     leave: () => room?.leave(),
   }
 }

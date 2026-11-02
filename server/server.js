@@ -19,6 +19,19 @@ const STATIC = path.resolve(process.env.STATIC_DIR || path.join(here, '..', 'dis
 const MAX_MSG = 10 * 1024 * 1024 // per message
 const MAX_ROOM = 100 * 1024 * 1024 // per workspace on disk
 const ROOM_RE = /^[a-f0-9]{64}$/
+const PUB_RE = /^[A-Za-z0-9_-]{87}$/ // raw P-256 public key, base64url
+
+// Workspaces with view-only links have a public key; every change must carry a valid signature.
+const te = new TextEncoder()
+const unb64u = (s) => new Uint8Array(Buffer.from(s, 'base64url'))
+async function verifier(r) {
+  if (!r.pub) return null
+  if (!r.verifyKey) r.verifyKey = await crypto.subtle.importKey('raw', unb64u(r.pub), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+  return async (data, sig) => {
+    if (typeof sig !== 'string') return false
+    try { return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, r.verifyKey, unb64u(sig), te.encode(data)) } catch { return false }
+  }
+}
 
 await mkdir(DATA, { recursive: true })
 
@@ -28,13 +41,14 @@ const rooms = new Map()
 async function getRoom(id) {
   let r = rooms.get(id)
   if (r) return r
-  r = { entries: [], seq: 0, size: 0, clients: new Set(), timer: null, loading: null }
+  r = { entries: [], seq: 0, size: 0, pub: null, clients: new Set(), timer: null, loading: null }
   rooms.set(id, r)
   r.loading = (async () => {
     try {
       const saved = JSON.parse(await readFile(path.join(DATA, id + '.json'), 'utf8'))
       r.entries = saved.entries || []
       r.seq = saved.seq || 0
+      r.pub = saved.pub || null
       r.size = r.entries.reduce((s, e) => s + e.data.length, 0)
     } catch {}
   })()
@@ -48,7 +62,7 @@ function scheduleSave(id, r) {
     r.timer = null
     const file = path.join(DATA, id + '.json')
     try {
-      await writeFile(file + '.tmp', JSON.stringify({ seq: r.seq, entries: r.entries }))
+      await writeFile(file + '.tmp', JSON.stringify({ seq: r.seq, pub: r.pub, entries: r.entries }))
       await rename(file + '.tmp', file)
     } catch (e) {
       console.error('save failed', id.slice(0, 8), e.message)
@@ -92,13 +106,21 @@ wss.on('connection', async (sock, req) => {
   r.clients.add(sock)
   sock.isAlive = true
   sock.on('pong', () => (sock.isAlive = true))
-  send(sock, { t: 'init', entries: r.entries, seq: r.seq })
+  send(sock, { t: 'init', entries: r.entries, seq: r.seq, pub: r.pub })
 
-  sock.on('message', (raw) => {
+  // Signature checks are async; handle each socket's messages strictly in order so acks match.
+  let queue = Promise.resolve()
+  sock.on('message', (raw) => { queue = queue.then(() => handle(raw)).catch((e) => console.error('message error', e.message)) })
+
+  async function handle(raw) {
     let m
     try { m = JSON.parse(raw) } catch { return }
+    if ((m.t === 'up' || m.t === 'compact') && r.pub) {
+      const verify = await verifier(r)
+      if (!(await verify(m.data, m.sig))) return send(sock, { t: 'error', for: m.t, error: 'This link is view-only. Ask for an edit link to make changes.' })
+    }
     if (m.t === 'up' && typeof m.data === 'string') {
-      if (r.size + m.data.length > MAX_ROOM) return send(sock, { t: 'error', error: 'Workspace is over the storage limit.' })
+      if (r.size + m.data.length > MAX_ROOM) return send(sock, { t: 'error', for: 'up', error: 'Workspace is over the storage limit.' })
       const e = { seq: ++r.seq, data: m.data }
       r.entries.push(e)
       r.size += m.data.length
@@ -115,8 +137,19 @@ wss.on('connection', async (sock, req) => {
     } else if (m.t === 'pres' && typeof m.data === 'string' && typeof m.tab === 'string') {
       sock.tab = m.tab.slice(0, 32)
       broadcast(r, sock, { t: 'pres', tab: sock.tab, data: m.data })
+    } else if (m.t === 'claim' && typeof m.pub === 'string' && PUB_RE.test(m.pub)) {
+      // First editor with keys turns on view-only links for this workspace (one time).
+      if (r.pub && r.pub !== m.pub) return send(sock, { t: 'error', error: 'This workspace already has a different owner key.' })
+      if (!r.pub) {
+        try { await crypto.subtle.importKey('raw', unb64u(m.pub), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']) }
+        catch { return send(sock, { t: 'error', error: 'Invalid owner key.' }) }
+        r.pub = m.pub
+        r.verifyKey = null
+        scheduleSave(id, r)
+        broadcast(r, sock, { t: 'pub', pub: r.pub })
+      }
     }
-  })
+  }
 
   sock.on('close', () => {
     r.clients.delete(sock)

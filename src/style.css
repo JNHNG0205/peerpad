@@ -194,6 +194,20 @@ textarea::placeholder { color: var(--muted); opacity: 0.6; }
 .toast.out { opacity: 0; }
 .scrim { display: none; }
 
+/* ---------- sharing & view-only ---------- */
+.ro-badge { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+.read-only .needs-edit, .read-only .handle, .read-only .page-icon.empty-icon { display: none !important; }
+.read-only .tail { cursor: default; }
+.read-only .page-icon { cursor: default; }
+.read-only .page-icon:hover { background: none; }
+.share-row { display: flex; flex-direction: column; gap: 6px; }
+.share-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.role { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 4px; }
+.role-edit { background: var(--accent); color: var(--bg); }
+.role-view { background: var(--panel-2); color: var(--fg); }
+.upgrade { border: 1px dashed var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.upgrade p { margin: 0; }
+
 @media (max-width: 760px) {
   #app { grid-template-columns: 1fr; }
   .side { position: fixed; inset: 0 auto 0 0; width: min(300px, 85vw); z-index: 40; transform: translateX(-100%); transition: transform 0.2s; padding-top: calc(10px + env(safe-area-inset-top, 0px)); }

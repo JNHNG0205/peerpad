@@ -1,5 +1,5 @@
 import * as Y from 'yjs'
-import { connect, loadLocal } from './sync.js'
+import { connect, loadLocal, generateWriteKeys, loadSigner } from './sync.js'
 import './style.css'
 
 /* ---------------- helpers ---------------- */
@@ -35,40 +35,54 @@ const me = store.get('pp-me', null) || {
 store.set('pp-me', me)
 
 const params = () => new URLSearchParams(location.hash.slice(1))
-let { ws, key, createdHere, srv } = (() => {
+// pk/sk: public/private signing key. Edit links carry both, view links only pk.
+let { ws, key, createdHere, srv, pk, sk } = (() => {
   const p = params()
   const recent = store.get('pp-recent', [])
   if (p.get('ws') && p.get('key')) {
     const known = recent.find((w) => w.ws === p.get('ws'))
-    return { ws: p.get('ws'), key: p.get('key'), createdHere: !!p.get('new'), srv: p.get('srv') || known?.srv || null }
+    const pk = p.get('pk') || known?.pk || null
+    // this browser keeps edit access if it had it before, even when opening a view link
+    const sk = p.get('sk') || (known?.pk === pk ? known?.sk : null) || null
+    return { ws: p.get('ws'), key: p.get('key'), createdHere: !!p.get('new'), srv: p.get('srv') || known?.srv || null, pk, sk }
   }
-  if (recent[0]) return { ws: recent[0].ws, key: recent[0].key, createdHere: false, srv: recent[0].srv || null }
-  return { ws: randToken(9), key: randToken(16), createdHere: true, srv: null }
+  if (recent[0]) return { ...recent[0], createdHere: false, srv: recent[0].srv || null, pk: recent[0].pk || null, sk: recent[0].sk || null }
+  return { ws: randToken(9), key: randToken(16), createdHere: true, srv: null, pk: null, sk: null }
 })()
 // The sync server that served this page is used automatically; "none" = explicitly disabled.
 let serverUrl = srv && srv !== 'none' ? srv : null
-const setHash = (page) => {
+function linkParams({ edit = true, page = null, withSrv = true } = {}) {
   const p = new URLSearchParams({ ws, key })
-  if (serverUrl) p.set('srv', serverUrl)
+  if (serverUrl && withSrv) p.set('srv', serverUrl)
+  if (pk) p.set('pk', pk)
+  if (pk && sk && edit) p.set('sk', sk)
   if (page) p.set('p', page)
-  history.replaceState(null, '', '#' + p.toString())
+  return p
 }
+const hashFor = (w) => {
+  const p = new URLSearchParams({ ws: w.ws, key: w.key })
+  for (const k of ['srv', 'pk', 'sk']) if (w[k]) p.set(k, w[k])
+  return p.toString()
+}
+const setHash = (page) => history.replaceState(null, '', '#' + linkParams({ page }).toString())
 setHash(params().get('p'))
 addEventListener('hashchange', () => {
   const p = params()
   if (p.get('ws') !== ws) location.reload()
   else if (p.get('p') && p.get('p') !== curId) openPage(p.get('p'))
 })
-const inviteLink = () => {
-  const p = new URLSearchParams({ ws, key })
-  if (serverUrl && !servedByServer) p.set('srv', serverUrl)
+/** edit=true: link that can edit; false: view-only link. */
+const inviteLink = (edit) => {
+  const p = linkParams({ edit, withSrv: !servedByServer })
   const base = servedByServer ? serverUrl.replace(/\/+$/, '') + '/' : location.href.split('#')[0]
   return base + '#' + p.toString()
 }
 let servedByServer = false
+let readOnly = !!pk && !sk
 
-function newWorkspace() {
-  location.hash = `ws=${randToken(9)}&key=${randToken(16)}&new=1` + (serverUrl ? '&srv=' + encodeURIComponent(serverUrl) : '')
+async function newWorkspace() {
+  const keys = await generateWriteKeys()
+  location.hash = hashFor({ ws: randToken(9), key: randToken(16), srv: serverUrl, ...keys }) + '&new=1'
 }
 
 /* ---------------- doc ---------------- */
@@ -146,13 +160,14 @@ app.append(
     h('input', { class: 'search', id: 'search', placeholder: 'Search pages', type: 'search' }),
     h('div', { class: 'side-label' }, 'Pages'),
     h('nav', { class: 'tree', id: 'tree' }),
-    h('button', { class: 'new-page', onclick: () => openPage(createPage(null)) }, '+ New page'),
+    h('button', { class: 'new-page needs-edit', onclick: () => !readOnly && openPage(createPage(null)) }, '+ New page'),
     h('div', { class: 'side-label' }, 'People here'),
     h('div', { class: 'people', id: 'people' })),
   h('main', { class: 'main' },
     h('header', { class: 'top' },
       h('button', { class: 'icon-btn only-mobile', onclick: () => document.body.classList.add('nav-open'), 'aria-label': 'Open sidebar' }, '☰'),
       h('div', { class: 'crumbs', id: 'crumbs' }),
+      h('span', { class: 'ro-badge', id: 'roBadge', hidden: true, title: 'You opened a view-only link' }, 'View only'),
       h('div', { class: 'faces', id: 'faces' }),
       h('button', { class: 'btn', id: 'shareBtn' }, 'Share'),
       h('button', { class: 'icon-btn', id: 'moreBtn', 'aria-label': 'Page options' }, '⋯')),
@@ -360,7 +375,7 @@ function openPage(id) {
       h('p', { class: 'muted' }, createdHere
         ? 'This workspace has no pages yet.'
         : 'Pages will appear once someone who has this workspace is online. You can also start writing now; your pages will merge with theirs.'),
-      h('button', { class: 'btn primary', onclick: () => openPage(createPage(null)) }, 'Create a page')))
+      readOnly ? null : h('button', { class: 'btn primary', onclick: () => openPage(createPage(null)) }, 'Create a page')))
     $('#crumbs').innerHTML = ''
     return
   }
@@ -370,16 +385,18 @@ function openPage(id) {
 
   // icon
   const iconBtn = h('button', { class: 'page-icon' + (map.get('icon') ? '' : ' empty-icon'), title: 'Change icon' }, map.get('icon') || '+ Add icon')
-  iconBtn.onclick = () => openMenuGrid(iconBtn)
+  iconBtn.onclick = () => !readOnly && openMenuGrid(iconBtn)
   const iconObs = () => { iconBtn.textContent = map.get('icon') || '+ Add icon'; iconBtn.classList.toggle('empty-icon', !map.get('icon')) }
   map.observe(iconObs)
   cur.cleanups.push(() => map.unobserve(iconObs))
 
   // title
   const title = h('textarea', { class: 'title', rows: 1, placeholder: 'Untitled', spellcheck: 'true', 'aria-label': 'Page title' })
+  title.readOnly = readOnly
   cur.cleanups.push(bindText(title, map.get('title')))
   title.addEventListener('input', () => { applyDiff(map.get('title'), title.value.replace(/\n/g, ' '), title); autosize(title) })
   title.addEventListener('keydown', (e) => {
+    if (readOnly) return
     if (e.key === 'Enter' || (e.key === 'ArrowDown' && title.selectionStart === title.value.length)) {
       e.preventDefault()
       if (e.key === 'Enter' && (!blocks.length || blocks.get(0).get('text').length)) doc.transact(() => blocks.insert(0, [makeBlock()]), 'local')
@@ -392,6 +409,7 @@ function openPage(id) {
   cur.container = container
   const tail = h('div', { class: 'tail', title: 'Click to add a block' })
   tail.onclick = () => {
+    if (readOnly) return
     const last = blocks.get(blocks.length - 1)
     if (!last || last.get('type') !== 'p' || last.get('text').length) doc.transact(() => blocks.push([makeBlock()]), 'local')
     focusBlock(blocks.length - 1, 'end')
@@ -407,7 +425,7 @@ function openPage(id) {
   cur.cleanups.push(() => blocks.unobserveDeep(deep))
   renderBlocks()
   renderCrumbs()
-  if (!title.value) title.focus()
+  if (!title.value && !readOnly) title.focus()
 }
 
 function renderCrumbs() {
@@ -537,7 +555,8 @@ function createNode(bm) {
       el.classList.toggle('done', !!bm.get('checked'))
       check.checked = !!bm.get('checked')
       ta.placeholder = T[type]?.ph || ''
-      ta.readOnly = type === 'divider' || type === 'pagelink'
+      ta.readOnly = readOnly || type === 'divider' || type === 'pagelink'
+      check.disabled = readOnly
       if (type === 'pagelink') {
         const ref = bm.get('ref')
         link.textContent = pages.has(ref) ? (pageIcon(ref) || '📄') + '  ' + pageTitle(ref) : '⚠  Deleted page'
@@ -598,6 +617,7 @@ function createNode(bm) {
 
   ta.addEventListener('keydown', (e) => {
     if (menuKey(e)) return
+    if (readOnly) return
     if (e.isComposing) return
     const type = bm.get('type')
     const i = idxOf(bm)
@@ -671,6 +691,7 @@ function createNode(bm) {
 
   // block options + drag
   handle.addEventListener('click', () => {
+    if (readOnly) return
     const i = idxOf(bm)
     openMenu(handle, [
       { heading: 'Turn into' },
@@ -683,6 +704,7 @@ function createNode(bm) {
     ])
   })
   handle.addEventListener('dragstart', (e) => {
+    if (readOnly) return e.preventDefault()
     dragFrom = idxOf(bm)
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', bm.get('text').toString())
@@ -712,7 +734,7 @@ function clearDrop() { document.querySelectorAll('.drop-before,.drop-after').for
 // Paste multi-line plain text as separate blocks.
 document.addEventListener('paste', (e) => {
   const ta = e.target
-  if (!cur || !(ta instanceof HTMLTextAreaElement) || !ta.classList.contains('bt')) return
+  if (readOnly || !cur || !(ta instanceof HTMLTextAreaElement) || !ta.classList.contains('bt')) return
   const text = e.clipboardData.getData('text/plain')
   const n = [...cur.nodes.values()].find((x) => x.ta === ta)
   if (!n || !text.includes('\n') || n.bm.get('type') === 'code') return
@@ -743,8 +765,8 @@ document.addEventListener('paste', (e) => {
 /* ---------------- undo / redo ---------------- */
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey
-  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? undo.redo() : undo.undo() }
-  else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); undo.redo() }
+  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (!readOnly) e.shiftKey ? undo.redo() : undo.undo() }
+  else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); if (!readOnly) undo.redo() }
   else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus() }
 })
 
@@ -775,7 +797,7 @@ function renderSidebar() {
       h('button', { class: 'caret' + (kids.length ? '' : ' none'), 'aria-label': open ? 'Collapse' : 'Expand', onclick: () => { collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); store.set('pp-collapsed', [...collapsed]); renderSidebar() } }, kids.length ? (open ? '▾' : '▸') : '•'),
       h('button', { class: 'item-title', onclick: () => openPage(id) }, h('span', { class: 'ico' }, pageIcon(id) || '📄'), h('span', { class: 'txt' }, pageTitle(id))),
       h('span', { class: 'dots' }, dots),
-      h('span', { class: 'acts' },
+      h('span', { class: 'acts needs-edit' },
         h('button', { class: 'act', title: 'Add a page inside', onclick: () => { collapsed.delete(id); openPage(createPage(id)) } }, '+'),
         h('button', { class: 'act', title: 'Delete page', onclick: () => askDeletePage(id) }, '×')))
     return [item, ...(open ? kids.flatMap((k) => row(k, depth + 1)) : [])]
@@ -817,16 +839,16 @@ meta.observe(renderSidebarSoon)
 /* ---------------- workspaces ---------------- */
 function rememberWorkspace(name) {
   const list = store.get('pp-recent', []).filter((w) => w.ws !== ws)
-  list.unshift({ ws, key, name, srv: srv === 'none' ? 'none' : serverUrl, ts: Date.now() })
+  list.unshift({ ws, key, name, srv: srv === 'none' ? 'none' : serverUrl, pk, sk: readOnly ? null : sk, ts: Date.now() })
   store.set('pp-recent', list.slice(0, 12))
 }
 $('#wsSwitch').onclick = () => {
   const recent = store.get('pp-recent', [])
   openMenu($('#wsSwitch'), [
     { heading: 'Workspaces' },
-    ...recent.map((w) => ({ label: w.name || 'Workspace', icon: w.ws === ws ? '✓' : '', run: () => { if (w.ws !== ws) location.hash = `ws=${w.ws}&key=${w.key}` + (w.srv ? '&srv=' + encodeURIComponent(w.srv) : '') } })),
+    ...recent.map((w) => ({ label: w.name || 'Workspace', icon: w.ws === ws ? '✓' : '', run: () => { if (w.ws !== ws) location.hash = hashFor(w) } })),
     { sep: true },
-    { label: 'Rename this workspace', icon: '✎', run: renameWorkspace },
+    ...(readOnly ? [] : [{ label: 'Rename this workspace', icon: '✎', run: renameWorkspace }]),
     { label: 'New workspace', icon: '+', run: newWorkspace },
     { label: 'Join with invite link', icon: '⇢', run: joinDialog },
     { label: 'Sync server…', icon: '☁', hint: serverUrl ? 'on' : 'off', run: serverDialog },
@@ -848,7 +870,7 @@ function joinDialog() {
       if (!p.get('ws') || !p.get('key')) { err.textContent = 'That link is missing the workspace ID or key. Ask for a fresh invite link.'; return false }
       const base = inp.value.includes('#') ? inp.value.split('#')[0] : ''
       if (/^https?:/.test(base) && base.split('#')[0] !== location.href.split('#')[0]) { location.href = inp.value.trim(); return }
-      location.hash = `ws=${p.get('ws')}&key=${p.get('key')}` + (p.get('srv') ? '&srv=' + encodeURIComponent(p.get('srv')) : '')
+      location.hash = hashFor(Object.fromEntries(p))
     },
   }])
 }
@@ -881,21 +903,50 @@ function serverDialog() {
     },
   }])
 }
+function linkRow(id, label, desc, edit) {
+  const inp = h('input', { class: 'field mono', id, readonly: true, value: inviteLink(edit), 'aria-label': label })
+  return h('div', { class: 'share-row' },
+    h('div', { class: 'share-head' }, h('span', { class: 'role ' + (edit ? 'role-edit' : 'role-view') }, label), h('span', { class: 'muted small' }, desc)),
+    h('div', { class: 'row' }, inp, h('button', { class: 'btn' + (edit ? ' primary' : ''), onclick: () => copy(inviteLink(edit), inp) }, 'Copy')))
+}
 $('#shareBtn').onclick = () => {
-  const inp = h('input', { class: 'field mono', id: 'invite', readonly: true, value: inviteLink() })
-  modal('Invite to this workspace', h('div', { class: 'stack' },
-    h('p', { class: 'muted' }, 'Anyone with this link can read and edit every page. The key after "key=" encrypts the connection and never leaves your browsers.'),
-    h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: () => copy(inviteLink(), inp) }, 'Copy link')),
-    h('p', { class: 'muted small' }, 'Sync is peer-to-peer: someone who has the latest changes must be online for others to receive them.')), [{ label: 'Done' }])
+  const rows = []
+  if (readOnly) {
+    rows.push(h('p', { class: 'muted' }, 'You have view access, so you can only share a view-only link.'))
+    rows.push(linkRow('inviteView', 'Can view', 'Read every page, no changes', false))
+  } else if (pk) {
+    rows.push(linkRow('inviteEdit', 'Can edit', 'Full access: write, rename, delete', true))
+    rows.push(linkRow('inviteView', 'Can view', 'Read every page, no changes', false))
+  } else {
+    rows.push(linkRow('inviteEdit', 'Can edit', 'Full access: write, rename, delete', true))
+    const upgrade = h('div', { class: 'upgrade' },
+      h('p', { class: 'small' }, h('strong', {}, 'Want view-only links? '),
+        serverUrl
+          ? 'Turn on permissions for this workspace. Links shared before now will become view-only, so send editors the new edit link afterwards.'
+          : 'This needs a sync server (workspace menu → Sync server…), so the server can block changes from view-only links.'),
+      serverUrl ? h('button', { class: 'btn', id: 'upgradeBtn', onclick: async (e) => {
+        e.currentTarget.disabled = true
+        const keys = await generateWriteKeys()
+        pk = keys.pk; sk = keys.sk
+        rememberWorkspace(meta.get('name') || 'Shared workspace')
+        setHash(curId)
+        location.reload()
+      } }, 'Turn on view-only links') : null)
+    rows.push(upgrade)
+  }
+  modal('Share this workspace', h('div', { class: 'stack' }, ...rows,
+    h('p', { class: 'muted small' }, 'Links contain the workspace key, so share them privately. Pages are encrypted with it; the sync server cannot read them.')), [{ label: 'Done' }])
 }
 $('#moreBtn').onclick = () => {
   if (!curId) return
   openMenu($('#moreBtn'), [
     { label: 'Copy page as Markdown', icon: '⧉', run: () => copy(toMarkdown(curId)) },
     { label: 'Export page (.md)', icon: '⤓', run: () => download(pageTitle(curId) + '.md', toMarkdown(curId)) },
-    { label: 'Add page inside', icon: '+', run: () => openPage(createPage(curId)) },
-    { sep: true },
-    { label: 'Delete page', icon: '🗑', danger: true, run: () => askDeletePage(curId) },
+    ...(readOnly ? [] : [
+      { label: 'Add page inside', icon: '+', run: () => openPage(createPage(curId)) },
+      { sep: true },
+      { label: 'Delete page', icon: '🗑', danger: true, run: () => askDeletePage(curId) },
+    ]),
   ])
 }
 function toMarkdown(id) {
@@ -923,7 +974,7 @@ let net = null
 let focusBlockId = null
 function connected() { const s = net?.status(); return s && (s.p2p > 0 || s.server === 'connected' || [...net.peers.values()].some((p) => p.via === 'tab')) }
 function setFocusBlock(id) { focusBlockId = id; updatePresence() }
-function updatePresence() { net?.setPresence({ name: me.name, color: me.color, page: curId, block: focusBlockId }) }
+function updatePresence() { net?.setPresence({ name: me.name, color: me.color, page: curId, block: readOnly ? null : focusBlockId, role: readOnly ? 'view' : 'edit' }) }
 function peersByPage() {
   const m = new Map()
   if (!net) return m
@@ -944,12 +995,12 @@ function renderPeople() {
   const people = $('#people')
   people.innerHTML = ''
   const face = (p, you) => h('span', { class: 'avatar', style: `background:${p.color}`, title: p.name }, (p.name || '?')[0].toUpperCase())
-  people.append(h('button', { class: 'person', onclick: profileDialog, title: 'Change your name' }, face(me), h('span', { class: 'txt' }, me.name, h('span', { class: 'muted' }, ' (you)'))))
+  people.append(h('button', { class: 'person', onclick: profileDialog, title: 'Change your name' }, face(me), h('span', { class: 'txt' }, me.name, h('span', { class: 'muted' }, readOnly ? ' (you, viewing)' : ' (you)'))))
   const faces = $('#faces')
   faces.innerHTML = ''
   for (const p of net.peers.values()) {
     people.append(h('button', { class: 'person', onclick: () => p.page && openPage(p.page) }, face(p),
-      h('span', { class: 'txt' }, p.name || 'Anonymous', h('span', { class: 'muted small sub' }, p.page ? 'on ' + pageTitle(p.page) : 'idle'))))
+      h('span', { class: 'txt' }, p.name || 'Anonymous', h('span', { class: 'muted small sub' }, (p.role === 'view' ? 'viewing ' : 'on ') + (p.page ? pageTitle(p.page) : 'nothing')))))
     if (p.page === curId) faces.append(face(p))
   }
   const st = net.status()
@@ -964,6 +1015,16 @@ function renderPeople() {
   else { cls = st.error ? 'err' : 'wait'; text = st.error ? 'Peer discovery failed. Working offline.' : 'Looking for peers… (edits saved offline)' }
   $('#net').className = 'net ' + cls
   $('#net').textContent = text
+}
+
+/* ---------------- read-only mode ---------------- */
+function applyReadOnly() {
+  document.body.classList.toggle('read-only', readOnly)
+  $('#roBadge').hidden = !readOnly
+  const t = $('.title')
+  if (t) t.readOnly = readOnly
+  if (cur) renderBlocks()
+  updatePresence()
 }
 
 /* ---------------- boot ---------------- */
@@ -981,8 +1042,15 @@ function renderPeople() {
     } catch {}
   }
   if (servedByServer && serverUrl === new URL('.', location.href).href.replace(/\/+$/, '')) setHash(params().get('p'))
-  net = connect(doc, ws, key, serverUrl)
-  net.onChange(() => { renderPeople(); renderPeerMarks(); renderSidebarSoon() })
+  if (createdHere && !pk) { const k = await generateWriteKeys(); pk = k.pk; sk = k.sk; setHash(params().get('p')) }
+  const signer = await loadSigner(pk, sk).catch(() => null)
+  if (pk && !signer?.canWrite) { readOnly = true; sk = null }
+  applyReadOnly()
+  net = connect(doc, ws, key, serverUrl, signer)
+  net.onChange(() => {
+    if (net.status().readOnly !== readOnly) { readOnly = net.status().readOnly; applyReadOnly() }
+    renderPeople(); renderPeerMarks(); renderSidebarSoon()
+  })
   renderPeople()
   setInterval(renderPeople, 5000)
   openPage(params().get('p') || children(null)[0])

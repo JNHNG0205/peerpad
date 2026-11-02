@@ -16,7 +16,7 @@ import { ToastProvider, useToast, Button } from './ui'
 import { Splash } from './Splash'
 import { writeMarkdown, pageMarkdown } from './convert'
 
-const WELCOME = `> 👋 Everything here syncs directly between browsers and is end-to-end encrypted. Your sync server only ever sees scrambled data.
+const WELCOME = `> 👋 Everything here is end-to-end encrypted: your PeerPad server only ever stores scrambled data.
 
 [TOC]
 
@@ -42,7 +42,7 @@ const WELCOME = `> 👋 Everything here syncs directly between browsers and is e
 | --- | --- |
 | Search | Ctrl+K |
 | Dark mode | Bottom of the sidebar |
-| AI access | See the README (MCP server) |
+| AI agents (Claude, Codex) | AI agents button, top right |
 `
 
 export default function App() {

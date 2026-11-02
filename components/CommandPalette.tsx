@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
-import { Search, FileText, Plus, Share2, Sun, Moon, CornerDownLeft } from 'lucide-react'
+import { Search, FileText, Plus, Share2, Sun, Moon, CornerDownLeft, Sparkles } from 'lucide-react'
 import { useWorkspace } from './workspace'
 import { titleOf, iconOf, ancestorsOf, fragmentOf } from '@/lib/pages.ts'
 import { cn } from './ui'
@@ -38,6 +38,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const actions: Item[] = [
       ...(w.readOnly ? [] : [{ id: 'new', label: query ? `New page “${q.trim()}”` : 'New page', icon: <Plus size={15} />, run: () => w.createPage(null, { title: q.trim() }) }]),
       { id: 'share', label: 'Share workspace', icon: <Share2 size={15} />, run: () => w.dialog('share') },
+      { id: 'agents', label: 'Connect AI agents (Claude, Codex)', icon: <Sparkles size={15} />, run: () => w.dialog('agents') },
       { id: 'theme', label: w.theme.resolved === 'dark' ? 'Switch to light theme' : 'Switch to dark theme', icon: w.theme.resolved === 'dark' ? <Sun size={15} /> : <Moon size={15} />, run: () => w.theme.setChoice(w.theme.resolved === 'dark' ? 'light' : 'dark') },
     ].filter((a) => !query || a.label.toLowerCase().includes(query) || a.id === 'new')
     return [...pages.slice(0, 30), ...actions]

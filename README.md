@@ -10,7 +10,7 @@ Built with Next.js, React, TypeScript, Tailwind CSS, Motion and [BlockNote](http
 - Real-time collaboration with live cursors and names; edits merge without conflicts
 - Nested pages with icons, breadcrumbs, and search over titles and page text (Ctrl+K)
 - Share links with **Can edit** or **Can view** access, enforced by the server
-- AI access: Claude, Codex and other MCP clients can read and edit pages
+- **AI agents**: connect Claude or Codex from the app, with edit or view access, and disconnect them any time
 - Light, dark and system themes; works on phones
 - Works offline: each browser keeps a copy and syncs when it reconnects
 - Import Markdown files as pages; export pages as Markdown (charts, tables and images included)
@@ -42,7 +42,7 @@ app/          Next.js entry (layout, global styles)
 components/   UI: App, Sidebar, Topbar, PageView, Editor, Dialogs, CommandPalette, blocks/
 lib/          shared TypeScript: remote.ts (encrypted transport), sync.ts, pages.ts, markdown.ts, blocks.ts
 server/       PeerPad server (Node): encrypted storage + relay, serves the web app from out/
-mcp/          MCP server for AI tools
+mcp/          AI agents service (MCP): per-connection endpoints, connection registry
 ```
 
 ## Self-host
@@ -65,7 +65,7 @@ mcp/          MCP server for AI tools
 Update later with `git pull && docker compose up -d --build`. Workspaces live in the `peerpad_peerpad-data` Docker volume; never run `docker compose down -v` unless you want to delete them.
 
 ### Other hosts
-- **Render**: New → Blueprint → pick this repo (`render.yaml`, includes a persistent disk).
+- **Render**: New → Blueprint → pick this repo (`render.yaml`, includes a persistent disk). This runs the app and server only; AI agents need the Docker setup or a second service (see below).
 - **Any Docker host**: `docker build -t peerpad . && docker run -p 8787:8787 -v peerpad:/data peerpad`, behind HTTPS.
 
 ### Local development
@@ -83,53 +83,34 @@ Links contain the workspace key, so share them privately. There are no accounts:
 
 Workspaces created before view links existed have a single link that can edit. **Share → Turn on view-only links** upgrades them; older links then become view-only, so send editors the new edit link.
 
-## AI access (MCP)
-PeerPad includes an MCP server so AI assistants can work in a workspace: list, read and search pages; create pages from Markdown (with tables, charts and images); add, edit and delete blocks; rename, move and delete pages. The AI shows up under **People here** while it works, and its edits appear live for everyone.
+## AI agents (Claude, Codex)
+Anyone in a workspace can connect an AI agent from the app; nobody needs server access.
 
-### 1. Turn it on (once, on your server)
-In PeerPad, click **Share** and copy the link the AI should use: **Can edit** to let it write, **Can view** for read-only. Then:
-```bash
-cd ~/peerpad
-echo "PEERPAD_INVITE='<paste the link>'" >> .env    # keep the single quotes
-echo "PEERPAD_AI_NAME=AI assistant" >> .env
-echo "MCP_TOKEN=$(openssl rand -hex 24)" >> .env
-docker compose --profile mcp up -d --build
-echo "https://$(grep ^DOMAIN .env | cut -d= -f2)/mcp/$(grep ^MCP_TOKEN .env | cut -d= -f2)"
-```
-The last command prints your **connector address**. Treat it like a password: anyone with it can use the AI tools with the access of the link you chose.
+1. Click **AI agents** (top right).
+2. Pick **Claude** or **Codex**, choose **Can edit** or **Can view**, and click **Connect**. People with a view link can only connect read-only agents.
+3. Copy the address it shows and follow the steps on screen:
+   - **Claude (web, desktop, mobile):** Settings → Connectors → **Add custom connector** → name it `PeerPad`, paste the address → Add. Then turn PeerPad on in a chat's tools menu.
+   - **Claude Code:** `claude mcp add --transport http peerpad "<address>"`
+   - **Codex:** `codex mcp add peerpad --url "<address>"`, or add `[mcp_servers.peerpad]` with `url = "<address>"` to `~/.codex/config.toml`.
 
-### 2. Connect your AI tool
-**Claude (web, desktop and mobile):** Settings → Connectors → **Add custom connector** → name `PeerPad`, paste the connector address → Add. Then turn PeerPad on in a chat's tools menu.
+Then ask, for example: *"List my PeerPad pages"*, *"Add today's meeting notes to Project tasks"*, *"Create a page with a bar chart of our monthly signups"*. The agent can list, read and search pages; create pages from Markdown (with tables, charts and images); add, edit and delete blocks; and rename, move and delete pages. It appears under **People here** while it works, and its edits show up live.
 
-**Claude Code:**
-```bash
-claude mcp add --transport http peerpad "<connector address>"
-```
+**Managing connections:** the same dialog lists your connections. Editors see every AI connection in the workspace and can disconnect any of them; a disconnected address stops working immediately.
 
-**Codex:**
-```bash
-codex mcp add peerpad --url "<connector address>"
-```
-Or in `~/.codex/config.toml`, keeping the token out of the file:
-```toml
-[mcp_servers.peerpad]
-url = "https://notes.example.com/mcp"
-bearer_token_env_var = "PEERPAD_MCP_TOKEN"
-```
+**Privacy:** each connection address contains a secret. The server stores the connection's workspace link encrypted with that secret and keeps only a hash of it, so its files on disk reveal nothing. While an agent is working, the server decrypts that workspace to answer it; when the agent is idle, the server cannot read it. Treat connection addresses like passwords.
 
-Then ask, for example: *"List my PeerPad pages"*, *"Add today's meeting notes to Project tasks"*, *"Create a page with a bar chart of our monthly signups"*.
+### For whoever runs the server
+AI agents are on by default in the Docker setup (the `mcp` service). Connections are stored in the `peerpad_mcp-data` volume. Health check: `curl -s https://notes.example.com/mcp/agents/status` should print `{"enabled":true}`.
 
-### Good to know
-- One MCP server works with one workspace (the link in `.env`).
-- The server needs that workspace's key to let the AI read pages, so the server can read that workspace. Other workspaces stay unreadable to it.
-- To revoke access: put a new `MCP_TOKEN` in `.env`, run `docker compose --profile mcp up -d`, and update the address in your AI tools.
-- Health check: `curl -s -o /dev/null -w "%{http_code}\n" https://notes.example.com/mcp` should print `401`.
+Running without Docker: start the AI service with `TRANSPORT=http PORT=3333 DATA_DIR=./data/mcp PEERPAD_SYNC_URL=http://127.0.0.1:8787 node mcp/peerpad-mcp.ts` and the server with `MCP_UPSTREAM=http://127.0.0.1:3333 npm start`, which forwards `/mcp` to it.
 
-### Advanced: run the MCP server on your own computer
-For maximum privacy (the key never leaves your machine) with desktop AI apps. Needs Node.js 22.18+:
+Setups from before the AI agents button (`PEERPAD_INVITE` + `MCP_TOKEN` in `.env`) keep working at `https://<domain>/mcp/<MCP_TOKEN>`.
+
+### Advanced: run an agent's MCP server on your own computer
+For desktop AI apps, if you want the workspace key to never reach the server. Needs Node.js 22.18+:
 ```bash
 git clone https://github.com/JNHNG0205/peerpad.git && cd peerpad && npm install
-claude mcp add peerpad -e PEERPAD_INVITE='<link>' -- node "$(pwd)/mcp/peerpad-mcp.ts"
-codex mcp add peerpad --env PEERPAD_INVITE='<link>' -- node "$(pwd)/mcp/peerpad-mcp.ts"
+claude mcp add peerpad -e PEERPAD_INVITE='<link from Share>' -- node "$(pwd)/mcp/peerpad-mcp.ts"
+codex mcp add peerpad --env PEERPAD_INVITE='<link from Share>' -- node "$(pwd)/mcp/peerpad-mcp.ts"
 ```
 Self-check: `PEERPAD_INVITE='<edit link>' npm run mcp:smoke` (creates and deletes a test page).

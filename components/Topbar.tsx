@@ -1,6 +1,6 @@
 'use client'
 import { AnimatePresence, motion } from 'motion/react'
-import { PanelLeftOpen, Menu as MenuIcon, MoreHorizontal, Copy, Download, FilePlus2, FileUp, Trash2, Eye, Share2 } from 'lucide-react'
+import { PanelLeftOpen, Menu as MenuIcon, MoreHorizontal, Copy, Download, FilePlus2, FileUp, Trash2, Eye, Share2, Sparkles } from 'lucide-react'
 import { useWorkspace } from './workspace'
 import { useY, useNet } from '@/lib/hooks.ts'
 import { ancestorsOf, titleOf, iconOf } from '@/lib/pages.ts'
@@ -60,6 +60,7 @@ export function Topbar() {
             <Eye size={12} /> View only
           </span>
         )}
+        <Button variant="outline" size="sm" onClick={() => w.dialog('agents')} title="Connect Claude, Codex and other AI agents"><Sparkles size={14} className="text-accent" /> <span className="max-[520px]:hidden">AI agents</span></Button>
         <Button variant="primary" size="sm" onClick={() => w.dialog('share')}><Share2 size={14} /> <span className="max-[400px]:hidden">Share</span></Button>
         {pageId && (
           <MenuButton items={menu} label="Page options" align="end" width={230}

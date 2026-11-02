@@ -3,9 +3,34 @@
 services:
   peerpad:
     build: .
+    image: peerpad-app
     restart: unless-stopped
     volumes:
       - peerpad-data:/data
+
+  # AI agents (MCP): lets Claude, Codex and other AI tools work in workspaces.
+  # People create their own connections in the app (AI agents button).
+  mcp:
+    image: peerpad-app
+    pull_policy: never
+    restart: unless-stopped
+    command: ["node", "mcp/peerpad-mcp.ts"]
+    environment:
+      - TRANSPORT=http
+      - HOST=0.0.0.0
+      - PORT=3333
+      - DATA_DIR=/data
+      - MCP_ALLOWED_HOSTS=${DOMAIN}
+      - PEERPAD_SYNC_URL=http://peerpad:8787
+      # optional single-workspace endpoint from earlier setups (https://$DOMAIN/mcp/<MCP_TOKEN>)
+      - PEERPAD_INVITE=${PEERPAD_INVITE:-}
+      - MCP_TOKEN=${MCP_TOKEN:-}
+      - PEERPAD_AI_NAME=${PEERPAD_AI_NAME:-AI assistant}
+    volumes:
+      - mcp-data:/data
+    depends_on:
+      - peerpad
+
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -20,25 +45,10 @@ services:
       - caddy-config:/config
     depends_on:
       - peerpad
-  # Optional AI access (MCP). Enable with:  docker compose --profile mcp up -d --build
-  # Needs PEERPAD_INVITE and MCP_TOKEN in .env. Reachable at https://$DOMAIN/mcp
-  mcp:
-    build: .
-    profiles: ["mcp"]
-    restart: unless-stopped
-    command: ["node", "mcp/peerpad-mcp.ts"]
-    environment:
-      - TRANSPORT=http
-      - HOST=0.0.0.0
-      - PORT=3333
-      - MCP_ALLOWED_HOSTS=${DOMAIN}
-      - PEERPAD_INVITE=${PEERPAD_INVITE:-}
-      - PEERPAD_SYNC_URL=http://peerpad:8787
-      - MCP_TOKEN=${MCP_TOKEN:-}
-      - PEERPAD_AI_NAME=${PEERPAD_AI_NAME:-AI assistant}
-    depends_on:
-      - caddy
+      - mcp
+
 volumes:
   peerpad-data:
+  mcp-data:
   caddy-data:
   caddy-config:

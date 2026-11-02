@@ -3,12 +3,13 @@
 // It joins the workspace like a teammate: it decrypts with the key in the invite link, so the
 // sync server still only ever sees encrypted data. Run with Node 22.18+ (runs TypeScript directly).
 //
-// Env:
-//   PEERPAD_INVITE    invite link from the app's Share button (required)
-//   PEERPAD_AI_NAME   name shown to teammates (default "AI assistant")
-//   PEERPAD_SYNC_URL  optional: reach the sync server at another address (e.g. http://peerpad:8787 in Docker)
-//   TRANSPORT=http    serve Streamable HTTP instead of stdio, with:
-//     PORT (3333), HOST (127.0.0.1), MCP_TOKEN (required), MCP_ALLOWED_HOSTS (comma list)
+// Two ways to run it:
+//   TRANSPORT=http  AI connector service for every workspace on the server; people create their own
+//                   connections in the app (AI agents). Env: PORT (3333), HOST (127.0.0.1),
+//                   DATA_DIR (where connections are stored), MCP_ALLOWED_HOSTS, PUBLIC_URL (optional)
+//   stdio           one workspace, started by a desktop AI app. Env: PEERPAD_INVITE (link from Share)
+// Both: PEERPAD_AI_NAME (default "AI assistant"), PEERPAD_SYNC_URL (reach the sync server at another
+// address, e.g. http://peerpad:8787 in Docker).
 import { timingSafeEqual } from 'node:crypto'
 import * as Y from 'yjs'
 import * as z from 'zod/v4'
@@ -30,7 +31,7 @@ const log = (...a: unknown[]) => console.error('[peerpad-mcp]', ...a) // stdout 
 const editor: any = ServerBlockNoteEditor.create({ schema: createServerSchema() } as any, getDocument())
 
 /* ------------------------------------------------------------------ config */
-type Invite = { ws: string; key: string; server: string; pk: string | null; sk: string | null }
+export type Invite = { ws: string; key: string; server: string; pk: string | null; sk: string | null }
 export function parseInvite(link: string | undefined): Invite {
   if (!link) throw new Error('Set PEERPAD_INVITE to the invite link from PeerPad (Share button).')
   let u: URL
@@ -400,36 +401,154 @@ export function createServerFor(W: WS) {
 
 /* ------------------------------------------------------------------ transport */
 const isMain = import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('peerpad-mcp.ts')
-if (isMain) {
+if (isMain && process.env.TRANSPORT === 'http') await serveHttp()
+else if (isMain) {
+  // stdio: one workspace, for AI apps that start the server themselves
   const W = await openWorkspace(parseInvite(process.env.PEERPAD_INVITE), process.env.PEERPAD_AI_NAME || 'AI assistant')
   W.ready().then(() => log('connected', W.readOnly() ? '(view-only link)' : '')).catch((e) => log(e.message))
-  const createServer = createServerFor(W)
-  if (process.env.TRANSPORT === 'http') {
-    const { createMcpExpressApp } = await import('@modelcontextprotocol/express')
-    const { toNodeHandler } = await import('@modelcontextprotocol/node')
+  serveStdio(createServerFor(W))
+  // exit when the AI client that started us goes away (otherwise the sync connection keeps us alive)
+  const bye = () => { W.close(); process.exit(0) }
+  process.stdin.on('end', bye)
+  process.stdin.on('close', bye)
+  log('running on stdio')
+}
+
+/**
+ * HTTP service:
+ *   /mcp/agents/*      create, list and revoke AI agent connections (used by the app's "AI agents" dialog)
+ *   /mcp/c/<token>     MCP endpoint of one connection (the address pasted into Claude, Codex, …)
+ *   /mcp[/<MCP_TOKEN>] optional single-workspace endpoint when PEERPAD_INVITE and MCP_TOKEN are set
+ */
+async function serveHttp() {
+  const { createMcpExpressApp } = await import('@modelcontextprotocol/express')
+  const { toNodeHandler } = await import('@modelcontextprotocol/node')
+  const { Connectors } = await import('./connectors.ts')
+  const { proofMessage, PROOF_MAX_AGE_MS } = await import('../lib/agents.ts')
+  const { unb64u } = await import('../lib/remote.ts')
+
+  const host = process.env.HOST || '127.0.0.1'
+  const port = Number(process.env.PORT || 3333)
+  const allowedHosts = process.env.MCP_ALLOWED_HOSTS?.split(',').map((x) => x.trim()).filter(Boolean)
+  const app = createMcpExpressApp(allowedHosts?.length ? { host, allowedHosts } : { host })
+  const registry = new Connectors(process.env.DATA_DIR || new URL('../data/mcp', import.meta.url).pathname)
+  await registry.load()
+  log(`${registry.size} AI connection(s) registered`)
+  const same = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y) }
+  const publicBase = (req: any) => (process.env.PUBLIC_URL || `${req.headers['x-forwarded-proto'] || req.protocol}://${req.headers['x-forwarded-host'] || req.headers.host}`).replace(/\/+$/, '')
+  const fail = (res: any, status: number, error: string) => res.status(status).json({ error })
+
+  // connections are opened on first use and closed after 10 idle minutes
+  type Live = { W: WS; handler: (req: any, res: any, body: unknown) => Promise<void>; used: number }
+  const live = new Map<string, Promise<Live>>()
+  const getLive = (id: string, invite: Invite, name: string) => {
+    let p = live.get(id)
+    if (!p) {
+      p = openWorkspace(invite, name).then((W) => ({ W, handler: toNodeHandler(createMcpHandler(createServerFor(W))) as any, used: Date.now() }))
+      p.catch(() => live.delete(id))
+      live.set(id, p)
+    }
+    return p
+  }
+  const closeLive = async (id: string) => { const p = live.get(id); live.delete(id); if (p) (await p.catch(() => null))?.W.close() }
+  setInterval(async () => {
+    for (const [id, p] of live) { const l = await p.catch(() => null); if (!l || Date.now() - l.used > 10 * 60_000) closeLive(id) }
+  }, 60_000).unref()
+
+  // simple per-IP rate limit for creating connections
+  const hits = new Map<string, number[]>()
+  const limited = (ip: string, max = 20) => {
+    const now = Date.now(), h = (hits.get(ip) || []).filter((t) => now - t < 3600_000)
+    h.push(now); hits.set(ip, h)
+    return h.length > max
+  }
+  async function verifyProof(body: any, action: 'list' | 'revoke' | 'revoke-all', id = '') {
+    const { pk, ts, sig } = body || {}
+    if (typeof pk !== 'string' || typeof sig !== 'string' || typeof ts !== 'number') return false
+    if (Math.abs(Date.now() - ts) > PROOF_MAX_AGE_MS) return false
+    const signer = await loadSigner(pk).catch(() => null)
+    return !!signer && signer.verify(unb64u(sig), proofMessage(action, pk, ts, id))
+  }
+
+  app.use('/mcp/agents', (req: any, res: any, next: () => void) => {
+    res.set({ 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'GET, POST, OPTIONS' })
+    if (req.method === 'OPTIONS') return res.status(204).end()
+    next()
+  })
+  app.get('/mcp/agents/status', (_req: any, res: any) => res.json({ enabled: true }))
+
+  app.post('/mcp/agents', async (req: any, res: any) => {
+    if (limited(req.ip)) return fail(res, 429, 'Too many new AI connections from this network. Try again in an hour.')
+    const { invite, name, agent, access } = req.body || {}
+    if (!['claude', 'codex', 'other'].includes(agent) || !['edit', 'view'].includes(access)) return fail(res, 400, 'Choose an agent and an access level.')
+    const label = String(name || '').trim().slice(0, 60) || 'AI assistant'
+    let cfg: Invite
+    try { cfg = parseInvite(invite) } catch (e) { return fail(res, 400, (e as Error).message) }
+    if (access === 'edit' && !cfg.sk) return fail(res, 403, 'Your link can only view this workspace, so the AI can only get view access.')
+    let W: WS | null = null
+    try {
+      W = await openWorkspace(access === 'view' ? { ...cfg, sk: null } : cfg, label)
+      await W.ready()
+      if (!W.pages.size && !W.meta.size) throw Object.assign(new Error('This workspace was not found on this server.'), { status: 404 })
+      if (access === 'edit' && W.readOnly()) throw Object.assign(new Error('Your link can only view this workspace, so the AI can only get view access.'), { status: 403 })
+    } catch (e: any) {
+      W?.close()
+      return fail(res, e.status || 502, e.message || 'Could not open the workspace.')
+    }
+    const { id, token, info } = await registry.create(access === 'view' ? { ...cfg, sk: null } : cfg, { name: label, agent, access })
+    const handler = toNodeHandler(createMcpHandler(createServerFor(W))) as any
+    live.set(id, Promise.resolve({ W, handler, used: Date.now() }))
+    log(`new AI connection ${id} (${agent}, ${access})`)
+    res.status(201).json({ ...info, token, address: `${publicBase(req)}/mcp/c/${token}` })
+  })
+
+  app.post('/mcp/agents/list', async (req: any, res: any) => {
+    if (!(await verifyProof(req.body, 'list'))) return fail(res, 403, 'Only editors can see all AI connections.')
+    res.json({ connections: registry.listByPk(req.body.pk) })
+  })
+
+  app.post('/mcp/agents/revoke', async (req: any, res: any) => {
+    const { token, id } = req.body || {}
+    let target: string | null = null
+    if (typeof token === 'string') target = registry.unlock(token)?.id ?? null // the person who created it
+    else if (typeof id === 'string' && registry.pkOf(id) === req.body?.pk && (await verifyProof(req.body, 'revoke', id))) target = id // any editor
+    if (!target) return fail(res, 403, 'You can revoke connections you created, or any connection if you can edit this workspace.')
+    await closeLive(target)
+    await registry.remove([target])
+    log(`revoked AI connection ${target}`)
+    res.json({ revoked: target })
+  })
+
+  // the MCP endpoint of one connection
+  app.all('/mcp/c/:token', async (req: any, res: any) => {
+    const u = registry.unlock(req.params.token)
+    if (!u) return fail(res, 404, 'This AI connection was revoked or does not exist. Create a new one in PeerPad (AI agents).')
+    try {
+      const l = await getLive(u.id, u.invite, u.info.name)
+      l.used = Date.now()
+      await l.handler(req, res, req.body)
+    } catch (e) {
+      if (!res.headersSent) fail(res, 502, (e as Error).message)
+    }
+  })
+
+  // optional single-workspace endpoint (configured with PEERPAD_INVITE + MCP_TOKEN in .env)
+  if (process.env.PEERPAD_INVITE) {
     const token = process.env.MCP_TOKEN
-    if (!token || token.length < 24) { log('Set MCP_TOKEN to a random secret of at least 24 characters (e.g. `openssl rand -hex 24`).'); process.exit(1) }
-    const host = process.env.HOST || '127.0.0.1'
-    const allowedHosts = process.env.MCP_ALLOWED_HOSTS?.split(',').map((s) => s.trim()).filter(Boolean)
-    const app = createMcpExpressApp(allowedHosts?.length ? { host, allowedHosts } : { host })
-    const nodeHandler = toNodeHandler(createMcpHandler(createServer))
-    const same = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y) }
-    // token as a Bearer header, or as the last path segment (for clients that only take a URL)
+    if (!token || token.length < 24) { log('PEERPAD_INVITE is set: also set MCP_TOKEN to a random secret of at least 24 characters (openssl rand -hex 24).'); process.exit(1) }
+    const W = await openWorkspace(parseInvite(process.env.PEERPAD_INVITE), process.env.PEERPAD_AI_NAME || 'AI assistant')
+    const handler = toNodeHandler(createMcpHandler(createServerFor(W))) as any
     const auth = (req: any, res: any, next: () => void) => {
       const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
       if (same(bearer, token) || same(String(req.params.token || ''), token)) return next()
-      res.status(401).json({ error: 'Missing or wrong MCP token.' })
+      fail(res, 401, 'Missing or wrong MCP token.')
     }
-    app.all('/mcp', auth, (req: any, res: any) => void nodeHandler(req, res, req.body))
-    app.all('/mcp/:token', auth, (req: any, res: any) => void nodeHandler(req, res, req.body))
-    const port = Number(process.env.PORT || 3333)
-    app.listen(port, host, () => log(`listening on http://${host}:${port}/mcp`))
+    app.all('/mcp', auth, (req: any, res: any) => void handler(req, res, req.body))
+    app.all('/mcp/:token', auth, (req: any, res: any) => void handler(req, res, req.body))
+    log('single-workspace endpoint enabled at /mcp')
   } else {
-    serveStdio(createServer)
-    // exit when the AI client that started us goes away (otherwise the sync connection keeps us alive)
-    const bye = () => { W.close(); process.exit(0) }
-    process.stdin.on('end', bye)
-    process.stdin.on('close', bye)
-    log('running on stdio')
+    app.all('/mcp', (_req: any, res: any) => fail(res, 401, 'Use the address of an AI connection (PeerPad → AI agents).'))
   }
+
+  app.listen(port, host, () => log(`listening on http://${host}:${port}`))
 }

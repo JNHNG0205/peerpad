@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Pencil, Eye, ShieldCheck, Copy } from 'lucide-react'
 import { useWorkspace, type DialogName, type Confirm } from './workspace'
 import { Button, Field, Modal, copyText, useToast, cn } from './ui'
+import { AgentsDialog } from './AgentsDialog'
 import { inviteLink, rememberWorkspace, store, hashFor, COLORS, generateWriteKeys, type Recent } from '@/lib/session.ts'
 
 export function Dialogs({ open, close, confirm, closeConfirm }: { open: DialogName | null; close: () => void; confirm: Confirm | null; closeConfirm: () => void }) {
@@ -13,6 +14,7 @@ export function Dialogs({ open, close, confirm, closeConfirm }: { open: DialogNa
       <ProfileDialog open={open === 'profile'} onClose={close} />
       <JoinDialog open={open === 'join'} onClose={close} />
       <RenameDialog open={open === 'rename'} onClose={close} />
+      <AgentsDialog open={open === 'agents'} onClose={close} />
       <Modal open={!!confirm} onClose={closeConfirm} title={confirm?.title || ''} width="max-w-md"
         footer={<>
           <Button onClick={closeConfirm}>Cancel</Button>

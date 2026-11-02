@@ -3,7 +3,7 @@ import { createContext, useContext } from 'react'
 import type { Session, Me } from '@/lib/session.ts'
 import type { ThemeChoice } from '@/lib/hooks.ts'
 
-export type DialogName = 'share' | 'server' | 'profile' | 'join' | 'rename'
+export type DialogName = 'share' | 'server' | 'profile' | 'join' | 'rename' | 'agents'
 export type Confirm = { title: string; text: string; action: string; onConfirm: () => void }
 
 export type Workspace = {

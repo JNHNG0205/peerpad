@@ -5,7 +5,7 @@
 // - Also serves the built web app (Next.js static export in out/), so one deploy = app + sync.
 //
 // Env: PORT (default 8787), DATA_DIR (default ./data), STATIC_DIR (default ../out)
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -135,8 +135,21 @@ async function handleAsset(req, res, room, id) {
   res.writeHead(405, CORS).end()
 }
 
+// Optional: forward /mcp/* to the AI connector service (MCP_UPSTREAM, e.g. http://127.0.0.1:3333).
+// Caddy does this routing in the Docker setup; this covers hosts without a reverse proxy.
+const MCP_UPSTREAM = process.env.MCP_UPSTREAM ? new URL(process.env.MCP_UPSTREAM) : null
+function proxyMcp(req, res) {
+  const up = httpRequest({
+    hostname: MCP_UPSTREAM.hostname, port: MCP_UPSTREAM.port, path: req.url, method: req.method,
+    headers: { ...req.headers, 'x-forwarded-host': req.headers.host, 'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http' },
+  }, (r) => { res.writeHead(r.statusCode || 502, r.headers); r.pipe(res) })
+  up.on('error', () => { if (!res.headersSent) res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'AI connections are not enabled on this server.' })) })
+  req.pipe(up)
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (MCP_UPSTREAM && (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/'))) return proxyMcp(req, res)
   const asset = url.pathname.match(/\/assets\/([a-f0-9]{64})\/([^/]+)$/)
   if (asset) {
     if (!ASSET_ID_RE.test(asset[2])) return res.writeHead(400, CORS).end('Bad id')

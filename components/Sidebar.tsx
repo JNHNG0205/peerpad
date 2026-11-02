@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   ChevronRight, ChevronsUpDown, Plus, Search, MoreHorizontal, Trash2, FilePlus2, PanelLeftClose, FileText,
-  Sun, Moon, Monitor, Cloud, LogIn, Pencil, UserRound, Check, FileUp,
+  Sun, Moon, Monitor, Cloud, LogIn, Pencil, UserRound, Check, FileUp, Sparkles,
 } from 'lucide-react'
 import { useWorkspace } from './workspace'
 import { useY, useNet } from '@/lib/hooks.ts'
@@ -30,6 +30,7 @@ export function Sidebar() {
       ...(w.readOnly ? [] : [{ label: 'Rename workspace', icon: <Pencil />, onSelect: () => w.dialog('rename') }]),
       { label: 'New workspace', icon: <Plus />, onSelect: async () => { location.hash = await newWorkspaceHash(s.serverUrl) } },
       { label: 'Join with invite link', icon: <LogIn />, onSelect: () => w.dialog('join') },
+      { label: 'AI agents', icon: <Sparkles />, onSelect: () => w.dialog('agents') },
       { label: 'Sync server', icon: <Cloud />, hint: s.serverUrl ? 'On' : 'Off', onSelect: () => w.dialog('server') },
       { label: 'Your name and color', icon: <UserRound />, onSelect: () => w.dialog('profile') },
     ]

@@ -1,10 +1,12 @@
 {$DOMAIN} {
-	encode gzip
-	# AI access (only answers when the optional mcp service is running)
+	# AI agents (MCP) and their connection endpoints; not compressed, so streamed responses flow through
 	handle /mcp* {
-		reverse_proxy mcp:3333
+		reverse_proxy mcp:3333 {
+			flush_interval -1
+		}
 	}
 	handle {
+		encode gzip
 		reverse_proxy peerpad:8787
 	}
 }

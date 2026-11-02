@@ -4,7 +4,7 @@ import { Pencil, Eye, ShieldCheck, Copy } from 'lucide-react'
 import { useWorkspace, type DialogName, type Confirm } from './workspace'
 import { Button, Field, Modal, copyText, useToast, cn } from './ui'
 import { AgentsDialog } from './AgentsDialog'
-import { inviteLink, rememberWorkspace, store, hashFor, COLORS, generateWriteKeys, type Recent } from '@/lib/session.ts'
+import { inviteLink, store, hashFor, COLORS, type Recent } from '@/lib/session.ts'
 
 export function Dialogs({ open, close, confirm, closeConfirm }: { open: DialogName | null; close: () => void; confirm: Confirm | null; closeConfirm: () => void }) {
   return (
@@ -50,7 +50,6 @@ function LinkRow({ edit }: { edit: boolean }) {
 function ShareDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const w = useWorkspace()
   const { s } = w
-  const [busy, setBusy] = useState(false)
   return (
     <Modal open={open} onClose={onClose} title="Share this workspace" footer={<Button onClick={onClose}>Done</Button>}>
       {w.readOnly ? (
@@ -66,23 +65,9 @@ function ShareDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
       ) : (
         <>
           <LinkRow edit />
-          <div className="flex flex-col items-start gap-2 rounded-xl border border-dashed border-line p-3">
-            <p><span className="font-medium">Want view-only links?</span>{' '}
-              <span className="text-muted">{s.serverUrl
-                ? 'Turn on permissions for this workspace. Links shared before now become view-only, so send editors the new edit link afterwards.'
-                : 'This needs a server (workspace menu → Server), so it can block changes from view-only links.'}</span>
-            </p>
-            {s.serverUrl && (
-              <Button disabled={busy} onClick={async () => {
-                setBusy(true)
-                const keys = await generateWriteKeys()
-                s.pk = keys.pk; s.sk = keys.sk
-                rememberWorkspace(s, (s.meta.get('name') as string) || 'Shared workspace')
-                location.hash = hashFor({ ws: s.ws, key: s.key, srv: s.servedByServer ? null : s.serverUrl, ...keys }, w.pageId)
-                location.reload()
-              }}>Turn on view-only links</Button>
-            )}
-          </div>
+          <p className="rounded-xl border border-dashed border-line p-3 text-muted">
+            {s.serverUrl ? 'The view-only link appears once this workspace has connected to the server.' : 'View-only links need a server (workspace menu → Server), so it can block changes from them.'}
+          </p>
         </>
       )}
       <p className="flex items-start gap-2 text-xs text-muted">

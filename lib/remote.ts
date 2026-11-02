@@ -101,6 +101,11 @@ export type TransportHooks = {
   onConnect?: () => void
   onDisconnect?: () => void
   onSigner?: (signer: Signer) => void
+  /** An old link that can edit (no keys in it): find keys this device already has for the workspace's
+   *  key `pub`, or, if the workspace has none yet (pub null), make keys to turn on edit and view links. */
+  upgrade?: (pub: string | null) => Promise<{ pk: string; sk: string } | null>
+  /** The workspace's keys as this link now knows them (sk null: this link can only view). */
+  onKeys?: (pk: string, sk: string | null) => void
   /** a page's history was deleted (the page was deleted) */
   onDropped?: (d: string) => void
 }
@@ -118,7 +123,7 @@ export type DocChannel = {
 export const COMPACT_AT = 150
 
 export function serverConnection(ws: string, key: string, url: string, tabId: string, hooks: TransportHooks = {}, signerIn: Signer | null = null) {
-  const h = { emit() {}, onAwareness() {}, onLeave() {}, onConnect() {}, onDisconnect() {}, onSigner() {}, onDropped() {}, ...hooks } as Required<TransportHooks>
+  const h = { emit() {}, onAwareness() {}, onLeave() {}, onConnect() {}, onDisconnect() {}, onSigner() {}, onDropped() {}, onKeys() {}, ...hooks } as Omit<Required<TransportHooks>, 'upgrade'>
   let signer = signerIn
   const st: TransportState = { status: 'connecting', error: null, everReady: false, readOnly: !!signer && !signer.canWrite }
   const signData = async (data: string) => (signer?.canWrite ? b64u(await signer.sign(te.encode(data))) : undefined)
@@ -126,6 +131,8 @@ export function serverConnection(ws: string, key: string, url: string, tabId: st
   let k: CryptoKey | null = null
   let room: string | null = null
   let open_ = false, retry = 1000, closed = false, pubKnown = false
+  let claimed: string | null = null // keys this link made and claimed, until the server confirms them
+  let upgrading: Promise<void> | null = null
   // Encryption is async; this chain keeps sends in the same order as the edits.
   let chain: Promise<unknown> = Promise.resolve()
   const enqueue = (fn: () => Promise<unknown> | unknown) => (chain = chain.then(fn, fn))
@@ -224,6 +231,7 @@ export function serverConnection(ws: string, key: string, url: string, tabId: st
     }
     sock.onclose = () => {
       open_ = false
+      pubKnown = false
       st.status = closed ? 'closed' : 'offline'
       // unacked updates are re-sent by the init diff after reconnecting
       for (const c of channels.values()) {
@@ -240,13 +248,30 @@ export function serverConnection(ws: string, key: string, url: string, tabId: st
   }
   /** Permissions: the server remembers the workspace's public key. */
   async function checkPub(pub: string | null | undefined): Promise<boolean> {
-    if (pub && signer && pub !== signer.pk) {
-      st.status = 'error'; st.error = 'This link does not match the workspace. Ask for a new invite link.'; h.emit(); return false
+    if (upgrading) await upgrading
+    if (!signer && hooks.upgrade && !upgrading) {
+      upgrading = hooks.upgrade(pub || null).then(async (keys) => {
+        if (!keys) return
+        signer = await loadSigner(keys.pk, keys.sk)
+        if (!signer) return
+        if (!pub) claimed = keys.pk // an editor opening an old workspace turns on edit and view links for it
+        h.onKeys(keys.pk, keys.sk); h.onSigner(signer)
+      }).catch(() => {})
+      await upgrading
     }
+    if (pub && signer && pub !== signer.pk) {
+      if (claimed !== signer.pk) {
+        st.status = 'error'; st.error = 'This link does not match the workspace. Ask for a new invite link.'; h.emit(); return false
+      }
+      // another editor upgraded the same old workspace first: theirs wins, this link can now only view
+      claimed = null
+      signer = null
+    }
+    if (pub && signer && pub === signer.pk) claimed = null
     if (pub && !signer) {
       // an old link opening an upgraded workspace: it can still read, but no longer edit
       signer = await loadSigner(pub)
-      if (signer) h.onSigner(signer)
+      if (signer) { h.onKeys(pub, null); h.onSigner(signer) }
     }
     if (signer && !pub && signer.canWrite && !pubKnown) sendJSON({ t: 'claim', pub: signer.pk })
     pubKnown = true

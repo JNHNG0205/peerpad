@@ -28,7 +28,7 @@ export default function Authorize() {
   const [paste, setPaste] = useState('')
   const [choices, setChoices] = useState<Choice[]>(() => {
     const recent = store.get<Recent[]>('pp-recent', []).filter((w) => sameOrigin(w.srv))
-    return recent.map((w, i) => ({ key: w.ws, label: w.name || 'Workspace', recent: w, canEdit: !!(w.pk && w.sk) || !w.pk, on: i === 0, access: (w.pk && !w.sk) ? 'view' : 'edit' }))
+    return recent.map((w, i) => ({ key: w.ws, label: w.name || 'Workspace', recent: w, canEdit: !!(w.pk && w.sk), on: i === 0, access: w.pk && w.sk ? 'edit' : 'view' }))
   })
 
   useEffect(() => {
@@ -52,7 +52,7 @@ export default function Authorize() {
     const p = new URLSearchParams(raw.includes('#') ? raw.split('#')[1] : raw)
     if (!p.get('ws') || !p.get('key')) { setError('That is not a PeerPad invite link.'); return }
     const r: Recent = { ws: p.get('ws')!, key: p.get('key')!, pk: p.get('pk'), sk: p.get('sk'), name: 'Workspace from link', srv: location.origin }
-    setChoices((c) => [...c.filter((x) => x.key !== r.ws), { key: r.ws, label: r.name!, recent: r, canEdit: !!r.sk || !r.pk, on: true, access: r.sk || !r.pk ? 'edit' : 'view' }])
+    setChoices((c) => [...c.filter((x) => x.key !== r.ws), { key: r.ws, label: r.name!, recent: r, canEdit: !!(r.pk && r.sk), on: true, access: r.pk && r.sk ? 'edit' : 'view' }])
     setPaste(''); setError('')
   }
   const allow = async () => {

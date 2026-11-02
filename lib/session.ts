@@ -1,7 +1,7 @@
 // Browser session: which workspace is open (from the link), its keys, the shared document and the network.
 'use client'
 import * as Y from 'yjs'
-import { connect, loadLocal, generateWriteKeys, loadSigner, type Net } from './sync.ts'
+import { connect, loadLocal, generateWriteKeys, loadSigner, upgradeKeys, type Net } from './sync.ts'
 import { pagesOf } from './pages.ts'
 
 export type Me = { name: string; color: string }
@@ -32,6 +32,8 @@ export type Session = {
   servedByServer: boolean     // this page was loaded from a PeerPad sync server
   pk: string | null; sk: string | null
   readOnly: boolean
+  /** this link could edit before the workspace got edit and view links; now it can only view */
+  downgraded?: boolean
   createdHere: boolean
   doc: Y.Doc
   pages: Y.Map<Y.Map<any>>
@@ -83,7 +85,24 @@ export async function startSession(): Promise<Session> {
   await loadLocal(doc, ws)
   const signer = await loadSigner(pk, sk).catch(() => null)
   if (pk && !signer?.canWrite) sk = null
-  const net = connect(doc, ws, key, serverUrl, signer)
+  // An old workspace without edit/view links gets them when an editor opens it. Tabs of this browser share one set of keys.
+  const upgrade = async (pub: string | null) => {
+    const make = async () => {
+      const known = store.get<Recent[]>('pp-recent', []).find((w) => w.ws === ws)
+      for (const k of [await upgradeKeys(ws), known]) if (k?.pk && k.sk && (!pub || k.pk === pub)) return { pk: k.pk, sk: k.sk }
+      if (pub) return null // turned on elsewhere: this old link can only view
+      const keys = await upgradeKeys(ws, await generateWriteKeys())
+      const list = store.get<Recent[]>('pp-recent', []).filter((w) => w.ws !== ws)
+      store.set('pp-recent', [{ ...(known || { ws, key, srv, name: 'Shared workspace' }), ...keys, ts: Date.now() }, ...list].slice(0, 12))
+      return keys
+    }
+    return navigator.locks ? navigator.locks.request('peerpad-upgrade:' + ws, make) : make()
+  }
+  const onKeys = (newPk: string, newSk: string | null) => {
+    if (!newSk && !s.readOnly) s.downgraded = true
+    s.pk = newPk; s.sk = newSk; s.readOnly = !newSk
+  }
+  const net = connect(doc, ws, key, serverUrl, signer, pk ? { onKeys } : { upgrade, onKeys })
   const s: Session = {
     ws, key, srv, serverUrl, servedByServer, pk, sk, createdHere,
     readOnly: !!pk && !sk,
@@ -102,8 +121,12 @@ export function inviteLink(s: Session, edit: boolean): string {
   return base + '#' + hashFor({ ws: s.ws, key: s.key, srv: s.serverUrl && !s.servedByServer ? s.serverUrl : null, pk: s.pk, sk: edit && !s.readOnly ? s.sk : null })
 }
 export function rememberWorkspace(s: Session, name: string) {
-  const list = store.get<Recent[]>('pp-recent', []).filter((w) => w.ws !== s.ws)
-  list.unshift({ ws: s.ws, key: s.key, name, srv: s.srv === 'none' ? 'none' : s.serverUrl, pk: s.pk, sk: s.readOnly ? null : s.sk, ts: Date.now() })
+  const all = store.get<Recent[]>('pp-recent', [])
+  const known = all.find((w) => w.ws === s.ws)
+  const list = all.filter((w) => w.ws !== s.ws)
+  // a tab still on an old link must not erase keys another tab just made for this workspace
+  const keys = s.pk ? { pk: s.pk, sk: s.readOnly ? null : s.sk } : { pk: known?.pk || null, sk: known?.sk || null }
+  list.unshift({ ws: s.ws, key: s.key, name, srv: s.srv === 'none' ? 'none' : s.serverUrl, ...keys, ts: Date.now() })
   store.set('pp-recent', list.slice(0, 12))
 }
 export async function newWorkspaceHash(serverUrl: string | null): Promise<string> {

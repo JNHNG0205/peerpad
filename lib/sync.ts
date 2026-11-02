@@ -7,7 +7,7 @@
 //  - Awareness = who is online, which page they are on, and live cursors (sent at most ~8 times a second)
 import * as Y from 'yjs'
 import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate, removeAwarenessStates } from 'y-protocols/awareness'
-import { serverConnection, type Signer, type TransportState, type DocChannel } from './remote.ts'
+import { serverConnection, type Signer, type TransportState, type DocChannel, type TransportHooks } from './remote.ts'
 
 export { generateWriteKeys, loadSigner } from './remote.ts'
 
@@ -32,6 +32,20 @@ async function idbGet(key: string): Promise<Uint8Array | null> {
 }
 const idbPut = (key: string, value: Uint8Array) => openDB().then((db) => db.transaction('docs', 'readwrite').objectStore('docs').put(value, key)).catch(() => {})
 const idbDelete = (key: string) => openDB().then((db) => db.transaction('docs', 'readwrite').objectStore('docs').delete(key)).catch(() => {})
+/** Edit keys a tab made for an old workspace, for the browser's other tabs (IndexedDB is consistent across tabs; localStorage can lag). */
+export async function upgradeKeys(ws: string, keys?: { pk: string; sk: string }): Promise<{ pk: string; sk: string } | null> {
+  const k = 'keys:' + ws
+  if (!keys) { const v = await idbGet(k); try { return v ? JSON.parse(new TextDecoder().decode(v)) : null } catch { return null } }
+  try {
+    const db = await openDB()
+    await new Promise<void>((res) => {
+      const tx = db.transaction('docs', 'readwrite')
+      tx.objectStore('docs').put(new TextEncoder().encode(JSON.stringify(keys)), k)
+      tx.oncomplete = () => res(); tx.onerror = () => res(); tx.onabort = () => res()
+    })
+  } catch {}
+  return keys
+}
 // the root document keeps the key earlier versions used for the whole workspace
 const idbKey = (ws: string, d: string) => (d === 'root' ? ws : `${ws}:p:${d}`)
 
@@ -46,7 +60,8 @@ export type Peer = { clientId: number; name: string; color: string; page: string
 export type NetStatus = { server: TransportState['status'] | null; serverError: string | null; readOnly: boolean }
 export type Net = ReturnType<typeof connect>
 
-export function connect(root: Y.Doc, ws: string, key: string, serverUrl: string | null = null, signerIn: Signer | null = null) {
+export function connect(root: Y.Doc, ws: string, key: string, serverUrl: string | null = null, signerIn: Signer | null = null,
+  keys: Pick<TransportHooks, 'upgrade' | 'onKeys'> = {}) {
   let signer = signerIn
   const awareness = new Awareness(root)
   const listeners = new Set<() => void>()
@@ -61,6 +76,7 @@ export function connect(root: Y.Doc, ws: string, key: string, serverUrl: string 
         onAwareness: (_tab, u) => { try { applyAwarenessUpdate(awareness, u, 'srv') } catch {} },
         onLeave: (t) => { const id = Number(t); if (id && id !== root.clientID) removeAwarenessStates(awareness, [id], 'srv') },
         onDropped: (d) => { idbDelete(idbKey(ws, d)) },
+        ...keys,
       }, signer)
     : null
   const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('peerpad2:' + ws) : null

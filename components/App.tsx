@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { MantineProvider } from '@mantine/core'
-import { FilePlus2, Users } from 'lucide-react'
+import { Eye, FilePlus2, Users } from 'lucide-react'
 import { startSession, loadMe, store, params, sessionHash, rememberWorkspace, type Session, type Me } from '@/lib/session.ts'
 import { useTheme, useIsMobile, useY, useNet } from '@/lib/hooks.ts'
 import { addPage, childrenOf, descendantsOf, removePages, titleOf } from '@/lib/pages.ts'
@@ -205,6 +205,13 @@ function Shell({ s }: { s: Session }) {
         )}
         <main className="min-w-0 flex-1 pr-[env(safe-area-inset-right)] max-[820px]:pl-[env(safe-area-inset-left)]">
           <Topbar />
+          {s.downgraded && (
+            <div role="status" className="mx-auto mt-2 flex max-w-3xl items-start gap-2 rounded-xl border border-line bg-accent-soft px-4 py-3 text-sm max-[820px]:mx-4">
+              <Eye size={16} className="mt-0.5 shrink-0 text-accent" />
+              <p><span className="font-medium">This link can now only view.</span>{' '}
+                <span className="text-muted">This workspace now has separate edit and view links. To edit, ask an editor for the new edit link (Share).</span></p>
+            </div>
+          )}
           {/* new pages mount immediately (an exit animation would delay focus on the new title) */}
           {valid ? <PageView key={valid} id={valid} /> : <Empty key="empty" />}
         </main>

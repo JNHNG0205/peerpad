@@ -93,7 +93,7 @@ npm run dev                  # UI with hot reload on http://localhost:3000 (set 
 
 Links contain the workspace key, so share them privately. There are no accounts: to remove someone's access, create a new workspace and move the pages over.
 
-Workspaces created before view links existed have a single link that can edit. **Share → Turn on view-only links** upgrades them; older links then become view-only, so send editors the new edit link.
+Workspaces created before view links existed get them automatically the first time an editor opens them; that editor's browser keeps editing. Their older links then become view-only and say so, so send the other editors the new edit link from **Share**.
 
 ## AI agents (Claude, ChatGPT, Codex)
 AI apps connect with one address, `https://<your-domain>/mcp`, and sign in the way apps usually do: PeerPad opens in your browser, you choose workspaces and access, click **Allow**, and you're sent back.

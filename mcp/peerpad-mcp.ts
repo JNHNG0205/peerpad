@@ -46,8 +46,7 @@ export function parseInvite(link: string | undefined): Invite {
 
 /* ------------------------------------------------------------------ one connected workspace */
 // The root document (page list) is loaded on open; page documents are loaded when a tool needs them.
-// viewOnly: also refuse writes in workspaces without view links (no signing keys, so the server cannot enforce it)
-export async function openWorkspace(cfg: Invite, aiName = 'AI assistant', aiColor = '#6e56cf', viewOnly = false) {
+export async function openWorkspace(cfg: Invite, aiName = 'AI assistant', aiColor = '#6e56cf') {
   const doc = new Y.Doc()
   const pages = pagesOf(doc)
   const meta = doc.getMap('meta')
@@ -61,7 +60,7 @@ export async function openWorkspace(cfg: Invite, aiName = 'AI assistant', aiColo
   awareness.on('update', ({ added, updated, removed }: any, origin: unknown) => {
     if (origin === 'local' && [...added, ...updated, ...removed].includes(doc.clientID)) conn.sendAwareness(encodeAwarenessUpdate(awareness, [doc.clientID]))
   })
-  const readOnly = () => viewOnly || conn.state.readOnly
+  const readOnly = () => conn.state.readOnly
   let idle: ReturnType<typeof setTimeout> | null = null
   const showActivity = (page: string | null) => {
     awareness.setLocalState({ user: { name: aiName, color: aiColor }, page, role: readOnly() ? 'view' : 'edit' })
@@ -514,10 +513,10 @@ async function serveHttp() {
   // connections are opened on first use and closed after 10 idle minutes
   type Live = { W: WS; handler: (req: any, res: any, body: unknown) => Promise<void>; used: number }
   const live = new Map<string, Promise<Live>>()
-  const getLive = (id: string, invite: Invite, name: string, viewOnly = false) => {
+  const getLive = (id: string, invite: Invite, name: string) => {
     let p = live.get(id)
     if (!p) {
-      p = openWorkspace(invite, name, undefined, viewOnly).then((W) => ({ W, handler: toNodeHandler(createMcpHandler(createServerFor(single(W)))) as any, used: Date.now() }))
+      p = openWorkspace(invite, name).then((W) => ({ W, handler: toNodeHandler(createMcpHandler(createServerFor(single(W)))) as any, used: Date.now() }))
       p.catch(() => live.delete(id))
       live.set(id, p)
     }
@@ -561,7 +560,8 @@ async function serveHttp() {
     const label = String(name || '').trim().slice(0, 60) || 'AI assistant'
     let cfg: Invite
     try { cfg = parseInvite(invite) } catch (e) { return fail(res, 400, (e as Error).message) }
-    if (access === 'edit' && cfg.pk && !cfg.sk) return fail(res, 403, 'Your link can only view this workspace, so the AI can only get view access.')
+    if (!cfg.pk) return fail(res, 409, 'Open this workspace in PeerPad once (it then gets edit and view links), copy its link again and retry.')
+    if (access === 'edit' && !cfg.sk) return fail(res, 403, 'Your link can only view this workspace, so the AI can only get view access.')
     let W: WS | null = null
     try {
       W = await openWorkspace(access === 'view' ? { ...cfg, sk: null } : cfg, label)
@@ -618,7 +618,7 @@ async function serveHttp() {
     const u = registry.unlock(req.params.token)
     if (!u) return fail(res, 404, 'This AI connection was revoked or does not exist. Create a new one in PeerPad (AI agents).')
     try {
-      const l = await getLive(u.id, u.invite, u.info.name, u.info.access === 'view')
+      const l = await getLive(u.id, u.invite, u.info.name)
       l.used = Date.now()
       await l.handler(req, res, req.body)
     } catch (e) {
@@ -659,7 +659,8 @@ async function serveHttp() {
       let cfg: Invite
       try { cfg = parseInvite(w.invite) } catch (e) { return res.status(400).json({ error: 'invalid_request', error_description: (e as Error).message }) }
       const access = w.access === 'edit' ? 'edit' : 'view'
-      if (access === 'edit' && cfg.pk && !cfg.sk) return res.status(403).json({ error: 'access_denied', error_description: `You can only view "${w.label}", so the app can only get view access to it.` })
+      if (!cfg.pk) return res.status(409).json({ error: 'invalid_request', error_description: `"${w.label}" uses an old link. Open it in PeerPad once (it then gets edit and view links) and try again.` })
+      if (access === 'edit' && !cfg.sk) return res.status(403).json({ error: 'access_denied', error_description: `You can only view "${w.label}", so the app can only get view access to it.` })
       // make sure the workspace exists here and the access is real
       const W = await openWorkspace(access === 'view' ? { ...cfg, sk: null } : cfg, 'checking').catch(() => null)
       try {
@@ -696,7 +697,7 @@ async function serveHttp() {
           w = u.workspaces.find((x) => x.entryId === id) || u.workspaces.find((x) => (names.get(x.entryId) || x.label).toLowerCase() === q)
         }
         if (!w) throw new Error(`Choose a workspace: ${resolver.list().map((x) => `"${x.name}" (${x.id})`).join(', ')}. Pass it as the workspace argument; peerpad_list_workspaces lists them.`)
-        const l = await getLive(`oauth:${u.grantId}:${w.entryId}`, w.invite, u.clientName, w.access === 'view')
+        const l = await getLive(`oauth:${u.grantId}:${w.entryId}`, w.invite, u.clientName)
         l.used = Date.now()
         const nm = l.W.meta.get('name') as string | undefined
         if (nm) names.set(w.entryId, nm)

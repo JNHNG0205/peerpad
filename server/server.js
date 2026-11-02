@@ -335,8 +335,8 @@ wss.on('connection', async (sock, req) => {
       sock.tab = m.tab.slice(0, 32)
       broadcast(r.clients, sock, { t: 'pres', tab: sock.tab, data: m.data })
     } else if (m.t === 'claim' && typeof m.pub === 'string' && PUB_RE.test(m.pub)) {
-      // First editor with keys turns on view-only links for this workspace (one time).
-      if (r.pub && r.pub !== m.pub) return send(sock, { t: 'error', error: 'This workspace already has a different owner key.' })
+      // The first editor with keys turns on edit and view links for this workspace (one time).
+      if (r.pub && r.pub !== m.pub) return send(sock, { t: 'pub', pub: r.pub }) // someone else turned them on first
       if (!r.pub) {
         try { await crypto.subtle.importKey('raw', unb64u(m.pub), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']) }
         catch { return send(sock, { t: 'error', error: 'Invalid owner key.' }) }

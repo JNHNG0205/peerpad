@@ -1,5 +1,7 @@
 import * as Y from 'yjs'
 import { connect, loadLocal, generateWriteKeys, loadSigner } from './sync.js'
+import { makeBlock, specOf, parseMarkdown, blocksToMarkdown, TEXT_TYPES } from './model.js'
+import { renderInline, hasMarkup, wrapSelection, processImage, imageBlock, tableBlock, chartBlock, tocBlock } from './rich.js'
 import './style.css'
 
 /* ---------------- helpers ---------------- */
@@ -91,16 +93,6 @@ const meta = doc.getMap('meta')
 const pages = doc.getMap('pages')
 const undo = new Y.UndoManager(pages, { trackedOrigins: new Set(['local', HTMLTextAreaElement]), captureTimeout: 400 })
 
-function makeBlock({ type = 'p', text = '', checked = false, indent = 0, ref = null } = {}) {
-  const m = new Y.Map()
-  m.set('id', uid())
-  m.set('type', type)
-  m.set('text', new Y.Text(text))
-  m.set('checked', checked)
-  m.set('indent', indent)
-  if (ref) m.set('ref', ref)
-  return m
-}
 function createPage(parent = null, title = '', blocks = [{}], icon = '') {
   const id = uid()
   doc.transact(() => {
@@ -321,7 +313,15 @@ const TYPES = [
   { type: 'code', label: 'Code', icon: '</>', ph: 'Code', md: '```' },
   { type: 'divider', label: 'Divider', icon: '—', md: '---' },
   { type: 'pagelink', label: 'Sub-page', icon: '↳', hint: 'new page inside' },
+  { type: 'image', label: 'Image', icon: '▣', hint: 'upload, paste or drop', ph: 'Add a caption' },
+  { type: 'table', label: 'Table', icon: '▦' },
+  { type: 'chart', label: 'Chart', icon: '▥', hint: 'bar or line', ph: 'Chart title' },
+  { type: 'toc', label: 'Table of contents', icon: '≡' },
 ]
+// Blocks whose content is not a single line of text get their own renderer.
+const RICH = { image: imageBlock, table: tableBlock, chart: chartBlock, toc: tocBlock }
+const kindOf = (type) => (RICH[type] ? type : 'text')
+const ATOMIC = new Set(['divider', 'pagelink', 'table', 'toc']) // no editable caption: Backspace deletes the block
 const T = Object.fromEntries(TYPES.map((t) => [t.type, t]))
 const LISTY = new Set(['bullet', 'number', 'todo'])
 const MD_RULES = [
@@ -465,7 +465,7 @@ function renderBlocks() {
   // remove stale first so surviving nodes (and focus) never move
   for (const [k, n] of cur.nodes) {
     const i = keys.indexOf(k)
-    if (i < 0 || arr[i] !== n.bm) { n.cleanup(); n.el.remove(); cur.nodes.delete(k) }
+    if (i < 0 || arr[i] !== n.bm || n.kind !== kindOf(arr[i].get('type'))) { n.cleanup(); n.el.remove(); cur.nodes.delete(k) }
   }
   let prev = null
   const numStack = []
@@ -494,6 +494,7 @@ function focusBlock(i, pos = 'end') {
   const bm = cur.blocks.get(Math.max(0, Math.min(i, cur.blocks.length - 1)))
   const n = bm && cur.byMap.get(bm)
   if (!n) return
+  n.beforeFocus?.()
   const ta = n.ta
   ta.focus()
   const p = pos === 'end' ? ta.value.length : pos === 'start' ? 0 : pos
@@ -501,7 +502,7 @@ function focusBlock(i, pos = 'end') {
 }
 
 function cloneBlock(bm) {
-  return makeBlock({ type: bm.get('type'), text: bm.get('text').toString(), checked: bm.get('checked'), indent: bm.get('indent') || 0, ref: bm.get('ref') })
+  return makeBlock(specOf(bm))
 }
 function moveBlock(from, to) {
   if (from === to || from + 1 === to) return
@@ -513,8 +514,26 @@ function moveBlock(from, to) {
   }, 'local')
 }
 
+/** Put a new block of another structure where `bm` is (if empty) or right after it. */
+function placeBlock(bm, nb) {
+  const i = idxOf(bm)
+  const replace = bm.get('type') === 'p' && !bm.get('text').length
+  doc.transact(() => {
+    if (replace) cur.blocks.delete(i, 1)
+    cur.blocks.insert(replace ? i : i + 1, [nb])
+    if ((replace ? i : i + 1) === cur.blocks.length - 1) cur.blocks.push([makeBlock()])
+  }, 'local')
+  return cur.byMap.get(nb)
+}
 function turnInto(bm, type) {
   const i = idxOf(bm)
+  if (type === 'image') return pickImages((files) => insertImages(files, bm))
+  if (type === 'table' || type === 'chart' || type === 'toc') {
+    const n = placeBlock(bm, makeBlock({ type }))
+    if (type === 'table') n?.rich?.focusFirst?.()
+    if (type === 'chart') n?.rich?.showData?.()
+    return
+  }
   if (type === 'pagelink') {
     const child = createPage(curId, bm.get('text').toString())
     doc.transact(() => { bm.set('type', 'pagelink'); bm.set('ref', child) }, 'local')
@@ -534,6 +553,63 @@ function turnInto(bm, type) {
   focusBlock(i, 'end')
 }
 
+/* ---------------- rich blocks: context + images ---------------- */
+const richCtx = {
+  readOnly: () => readOnly,
+  transact: (fn) => doc.transact(fn, 'local'),
+  bindText, applyDiff, autosize,
+  onFocus: () => setFocusBlock(null),
+  assets: () => net?.assets || null,
+  headings: () => (cur ? cur.blocks.toArray().filter((b) => /^h[123]$/.test(b.get('type'))).map((b) => ({ bm: b, type: b.get('type'), text: b.get('text').toString() })) : []),
+  scrollToBlock: (b) => { const n = cur?.byMap.get(b); if (n) { n.el.scrollIntoView({ behavior: 'smooth', block: 'start' }); focusBlock(idxOf(b), 'end') } },
+}
+function pickImages(onFiles, multiple = true) {
+  if (readOnly) return
+  const inp = h('input', { type: 'file', accept: 'image/*', multiple, hidden: true })
+  inp.onchange = () => { if (inp.files.length) onFiles([...inp.files]); inp.remove() }
+  document.body.append(inp)
+  inp.click()
+}
+const MAX_INLINE = 1.5 * 1024 * 1024
+/** Encrypt + upload to the sync server, or embed small images when there is no server. */
+async function storeImage(file) {
+  const { bytes, mime } = await processImage(file)
+  if (net?.assets) return { asset: await net.assets.upload(bytes), mime }
+  if (bytes.length > MAX_INLINE) throw new Error('Images over 1.5 MB need a sync server (workspace menu → Sync server…).')
+  return { data: bytes, mime }
+}
+async function insertImages(files, afterBm) {
+  const imgs = files.filter((f) => f.type.startsWith('image/'))
+  if (!imgs.length || readOnly || !cur) return
+  toast(imgs.length > 1 ? `Uploading ${imgs.length} images…` : 'Uploading image…')
+  let anchor = afterBm
+  for (const f of imgs) {
+    try {
+      const src = await storeImage(f)
+      const nb = makeBlock({ type: 'image', ...src })
+      if (anchor) placeBlock(anchor, nb)
+      else doc.transact(() => cur.blocks.push([nb]), 'local')
+      anchor = nb
+    } catch (e) {
+      toast(e.message || 'Upload failed')
+    }
+  }
+}
+async function replaceImage(bm, file) {
+  if (!file) return
+  try {
+    const src = await storeImage(file)
+    doc.transact(() => { for (const k of ['asset', 'url', 'data', 'mime']) bm.delete(k); for (const [k, v] of Object.entries(src)) bm.set(k, v) }, 'local')
+  } catch (e) { toast(e.message || 'Upload failed') }
+}
+
+let tocQueued = false
+function refreshTocsSoon() {
+  if (tocQueued) return
+  tocQueued = true
+  requestAnimationFrame(() => { tocQueued = false; if (cur) for (const n of cur.nodes.values()) if (n.kind === 'toc') n.rich.update() })
+}
+
 let dragFrom = -1
 function createNode(bm) {
   const ta = h('textarea', { class: 'bt', rows: 1, spellcheck: 'true' })
@@ -541,12 +617,36 @@ function createNode(bm) {
   const marker = h('div', { class: 'marker' }, check)
   const handle = h('button', { class: 'handle', draggable: 'true', title: 'Drag to move, click for options', 'aria-label': 'Block options' }, '⋮⋮')
   const link = h('button', { class: 'plink' })
-  const el = h('div', { class: 'block' }, handle, h('div', { class: 'body' }, marker, ta, link))
+  const preview = h('div', { class: 'preview' })
+  const body = h('div', { class: 'body' }, marker, ta, preview, link)
+  const el = h('div', { class: 'block' }, handle, body)
   const unbind = bindText(ta, bm.get('text'))
   let slashAt = -1
+  const kind = kindOf(bm.get('type'))
+  const rich = RICH[kind] ? RICH[kind](richCtx, bm, body, ta) : null
+
+  // Inline formatting: show rendered text, switch to the raw text while editing.
+  const refreshPreview = () => {
+    const type = bm.get('type'), text = ytext.toString()
+    const show = kind === 'text' && document.activeElement !== ta && !['code', 'divider', 'pagelink'].includes(type) && hasMarkup(text)
+    el.classList.toggle('previewing', show)
+    if (show) preview.innerHTML = renderInline(text)
+  }
+  const textObs = () => { refreshPreview(); if (/^h[123]$/.test(bm.get('type'))) refreshTocsSoon() }
+  const ytext = bm.get('text') // keep a reference: a deleted block no longer returns it
+  ytext.observe(textObs)
+  ta.addEventListener('blur', refreshPreview)
+  preview.addEventListener('mousedown', (e) => {
+    if (e.target.closest('a')) return
+    e.preventDefault()
+    n.beforeFocus()
+    ta.focus()
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+  })
 
   const n = {
-    bm, el, ta,
+    bm, el, ta, kind, rich,
+    beforeFocus() { el.classList.remove('previewing') },
     update(num) {
       const type = bm.get('type') || 'p'
       el.dataset.type = type
@@ -555,16 +655,18 @@ function createNode(bm) {
       el.classList.toggle('done', !!bm.get('checked'))
       check.checked = !!bm.get('checked')
       ta.placeholder = T[type]?.ph || ''
-      ta.readOnly = readOnly || type === 'divider' || type === 'pagelink'
+      ta.readOnly = readOnly || ATOMIC.has(type)
       check.disabled = readOnly
       if (type === 'pagelink') {
         const ref = bm.get('ref')
         link.textContent = pages.has(ref) ? (pageIcon(ref) || '📄') + '  ' + pageTitle(ref) : '⚠  Deleted page'
         link.classList.toggle('dead', !pages.has(ref))
       }
+      rich?.update()
+      refreshPreview()
       requestAnimationFrame(() => autosize(ta))
     },
-    cleanup() { unbind() },
+    cleanup() { unbind(); ytext.unobserve(textObs); rich?.cleanup() },
   }
 
   link.onclick = () => { const ref = bm.get('ref'); if (pages.has(ref)) openPage(ref) }
@@ -583,7 +685,7 @@ function createNode(bm) {
       positionMenuAtCaret()
     } else if (slashAt >= 0 && menu) {
       const q = ta.value.slice(slashAt + 1, caret)
-      if (caret <= slashAt || /[\s/]/.test(q) || q.length > 16 || ta.value[slashAt] !== '/') { closeMenu(); slashAt = -1 }
+      if (caret <= slashAt || /[\n/]|\s\s|^\s/.test(q) || q.length > 24 || ta.value[slashAt] !== '/') { closeMenu(); slashAt = -1 }
       else { menu.filter = q; menu.active = 0; menu.render() }
     }
     // markdown shortcuts
@@ -623,6 +725,37 @@ function createNode(bm) {
     const i = idxOf(bm)
     const s = ta.selectionStart, en = ta.selectionEnd, text = ta.value
     const ind = bm.get('indent') || 0
+    const mod = e.metaKey || e.ctrlKey
+    if (mod && !ATOMIC.has(type) && type !== 'code') {
+      const k = e.key.toLowerCase()
+      const fmt = { b: ['**'], i: ['*'], e: ['`'] }[k] || (k === 'x' && e.shiftKey ? ['~~'] : null)
+      if (fmt) { e.preventDefault(); e.stopPropagation(); wrapSelection(ta, fmt[0]); return }
+      if (k === 'k') {
+        e.preventDefault(); e.stopPropagation()
+        const sel = ta.value.slice(s, en) || 'link'
+        ta.setRangeText(`[${sel}](https://)`, s, en)
+        ta.setSelectionRange(s + sel.length + 3, s + sel.length + 11)
+        ta.dispatchEvent(new Event('input'))
+        return
+      }
+    }
+    if (RICH[type] || ATOMIC.has(type)) {
+      // image / chart caption, or a block without text: Enter adds a paragraph below, Backspace removes it
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        if (type === 'pagelink') { link.click(); return }
+        doc.transact(() => cur.blocks.insert(i + 1, [makeBlock()]), 'local')
+        focusBlock(i + 1, 'start')
+        return
+      }
+      if ((e.key === 'Backspace' || e.key === 'Delete') && (ATOMIC.has(type) || (!text && s === 0))) {
+        e.preventDefault()
+        doc.transact(() => { cur.blocks.delete(i, 1); if (!cur.blocks.length) cur.blocks.push([makeBlock()]) }, 'local')
+        focusBlock(Math.max(0, i - 1), 'end')
+        return
+      }
+      if (e.key === 'Tab') { e.preventDefault(); return }
+    }
 
     if (e.key === 'Enter' && !e.shiftKey) {
       if (type === 'code' && !(e.metaKey || e.ctrlKey)) return
@@ -659,7 +792,7 @@ function createNode(bm) {
       e.preventDefault()
       const prev = cur.blocks.get(i - 1)
       const pt = prev.get('type')
-      if (pt === 'divider' || pt === 'pagelink') {
+      if (ATOMIC.has(pt) || RICH[pt]) {
         if (!text) { doc.transact(() => cur.blocks.delete(i, 1), 'local'); focusBlock(i - 1, 'end') }
         else doc.transact(() => cur.blocks.delete(i - 1, 1), 'local')
         return
@@ -693,10 +826,22 @@ function createNode(bm) {
   handle.addEventListener('click', () => {
     if (readOnly) return
     const i = idxOf(bm)
-    openMenu(handle, [
+    const type = bm.get('type')
+    const specific = type === 'image' ? [
+      { heading: 'Image width' },
+      ...[25, 50, 75, 100].map((w) => ({ label: w + '%', icon: (bm.get('width') || 100) === w ? '✓' : '', run: () => doc.transact(() => bm.set('width', w), 'local') })),
+      { label: 'Replace image', icon: '⟳', run: () => pickImages((files) => replaceImage(bm, files[0]), false) },
+      { label: 'Open full size', icon: '↗', run: () => { const src = n.rich?.src(); if (src) window.open(src, '_blank', 'noopener') } },
+    ] : type === 'chart' ? [
+      { label: bm.get('chart') === 'line' ? 'Show as bars' : 'Show as line', icon: '▥', run: () => doc.transact(() => bm.set('chart', bm.get('chart') === 'line' ? 'bar' : 'line'), 'local') },
+      { label: 'Edit data', icon: '▦', run: () => n.rich?.showData() },
+    ] : RICH[type] ? [] : [
       { heading: 'Turn into' },
-      ...TYPES.filter((t) => t.type !== 'pagelink').map((t) => ({ ...t, run: () => turnInto(bm, t.type) })),
-      { sep: true },
+      ...TYPES.filter((t) => TEXT_TYPES.includes(t.type) || t.type === 'divider').map((t) => ({ ...t, run: () => turnInto(bm, t.type) })),
+    ]
+    openMenu(handle, [
+      ...specific,
+      ...(specific.length ? [{ sep: true }] : []),
       { label: 'Duplicate', icon: '⧉', run: () => doc.transact(() => cur.blocks.insert(i + 1, [cloneBlock(bm)]), 'local') },
       { label: 'Move up', icon: '↑', run: () => i > 0 && moveBlock(i, i - 1) },
       { label: 'Move down', icon: '↓', run: () => moveBlock(i, i + 2) },
@@ -731,13 +876,31 @@ function createNode(bm) {
 }
 function clearDrop() { document.querySelectorAll('.drop-before,.drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after')) }
 
-// Paste multi-line plain text as separate blocks.
+// Paste: images become image blocks; tab-separated rows (from spreadsheets) become a table;
+// Markdown with tables, images or charts becomes those blocks; other multi-line text becomes paragraphs.
 document.addEventListener('paste', (e) => {
   const ta = e.target
-  if (readOnly || !cur || !(ta instanceof HTMLTextAreaElement) || !ta.classList.contains('bt')) return
+  if (readOnly || !cur || !(ta instanceof HTMLTextAreaElement)) return
+  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'))
+  const owner = [...cur.nodes.values()].find((x) => x.ta === ta || x.el.contains(ta))
+  if (files.length && owner) { e.preventDefault(); insertImages(files, owner.bm); return }
+  if (!ta.classList.contains('bt')) return
   const text = e.clipboardData.getData('text/plain')
   const n = [...cur.nodes.values()].find((x) => x.ta === ta)
   if (!n || !text.includes('\n') || n.bm.get('type') === 'code') return
+  const lines0 = text.replace(/\r/g, '').split('\n').filter((l) => l.trim())
+  const tsv = lines0.length > 1 && lines0.every((l) => l.includes('\t'))
+  if (tsv || /^\s*\|.*\|\s*$/m.test(text) || /^!\[.*\]\(.+\)\s*$/m.test(text) || /^```chart/m.test(text)) {
+    e.preventDefault()
+    const specs = tsv ? [{ type: 'table', rows: lines0.map((l) => l.split('\t')) }] : parseMarkdown(text)
+    const i = idxOf(n.bm)
+    const replace = !n.bm.get('text').length
+    doc.transact(() => {
+      if (replace) cur.blocks.delete(i, 1)
+      cur.blocks.insert(replace ? i : i + 1, specs.map(makeBlock))
+    }, 'local')
+    return
+  }
   e.preventDefault()
   const lines = text.replace(/\r/g, '').split('\n')
   const i = idxOf(n.bm)
@@ -760,6 +923,17 @@ document.addEventListener('paste', (e) => {
     cur.blocks.insert(i + 1, rest.map(makeBlock))
   }, 'local')
   focusBlock(i + lines.length - 1, 'end')
+})
+
+// Drop image files onto the page.
+$('#scroll').addEventListener('dragover', (e) => { if (!readOnly && e.dataTransfer?.types.includes('Files')) e.preventDefault() })
+$('#scroll').addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])]
+  if (readOnly || !cur || !files.some((f) => f.type.startsWith('image/'))) return
+  e.preventDefault()
+  const target = e.target.closest?.('.block')
+  const n = target && [...cur.nodes.values()].find((x) => x.el === target)
+  insertImages(files, n?.bm || cur.blocks.get(cur.blocks.length - 1))
 })
 
 /* ---------------- undo / redo ---------------- */
@@ -944,25 +1118,33 @@ $('#moreBtn').onclick = () => {
     { label: 'Export page (.md)', icon: '⤓', run: () => download(pageTitle(curId) + '.md', toMarkdown(curId)) },
     ...(readOnly ? [] : [
       { label: 'Add page inside', icon: '+', run: () => openPage(createPage(curId)) },
+      { label: 'Import Markdown as page…', icon: '⤒', run: () => importMarkdown(curId) },
       { sep: true },
       { label: 'Delete page', icon: '🗑', danger: true, run: () => askDeletePage(curId) },
     ]),
   ])
 }
 function toMarkdown(id) {
-  const p = pages.get(id)
-  const out = [`# ${pageIcon(id) ? pageIcon(id) + ' ' : ''}${pageTitle(id)}`, '']
-  let n = 0
-  for (const b of p.get('blocks').toArray()) {
-    const t = b.get('text').toString(), pad = '  '.repeat(b.get('indent') || 0), type = b.get('type')
-    n = type === 'number' ? n + 1 : 0
-    out.push({
-      h1: `# ${t}`, h2: `## ${t}`, h3: `### ${t}`, bullet: `${pad}- ${t}`, number: `${pad}${n}. ${t}`,
-      todo: `${pad}- [${b.get('checked') ? 'x' : ' '}] ${t}`, quote: `> ${t}`, callout: `> 💡 ${t}`,
-      code: '```\n' + t + '\n```', divider: '---', pagelink: `[${pageTitle(b.get('ref'))}]`,
-    }[type] ?? `${pad}${t}`)
+  const head = `# ${pageIcon(id) ? pageIcon(id) + ' ' : ''}${pageTitle(id)}\n\n`
+  return head + blocksToMarkdown(pages.get(id).get('blocks').toArray(), pageTitle) + '\n'
+}
+/** Import .md files as new pages (inside `parent`). The first "# Heading" becomes the title. */
+function importMarkdown(parent) {
+  const inp = h('input', { type: 'file', accept: '.md,.markdown,.txt,text/markdown,text/plain', multiple: true, hidden: true })
+  inp.onchange = async () => {
+    let last = null
+    for (const f of inp.files) {
+      const text = await f.text()
+      const m = text.match(/^\s*#\s+(.+)\n?/)
+      const title = m ? m[1].trim() : f.name.replace(/\.(md|markdown|txt)$/i, '')
+      const specs = parseMarkdown(m ? text.slice(m[0].length) : text)
+      last = createPage(parent, title, specs.length ? specs : [{}])
+    }
+    inp.remove()
+    if (last) { openPage(last); toast(inp.files.length > 1 ? `Imported ${inp.files.length} pages` : 'Page imported') }
   }
-  return out.join('\n') + '\n'
+  document.body.append(inp)
+  inp.click()
 }
 function download(name, text) {
   const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/markdown' })), download: name.replace(/[\\/:*?"<>|]/g, '_') })

@@ -32,6 +32,17 @@ async function seal(k, bytes) {
   out.set(ct, 12)
   return b64(out)
 }
+async function sealBytes(k, bytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, bytes))
+  const out = new Uint8Array(12 + ct.length)
+  out.set(iv)
+  out.set(ct, 12)
+  return out
+}
+async function unsealBytes(k, u) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.subarray(0, 12) }, k, u.subarray(12)))
+}
 async function unseal(k, s) {
   const u = unb64(s)
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.subarray(0, 12) }, k, u.subarray(12)))
@@ -204,6 +215,17 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}, signer = n
       })
     })
   }
+  const assetUrl = (id) => {
+    const u = new URL(url)
+    u.pathname = u.pathname.replace(/\/+$/, '') + `/assets/${room}/${id}`
+    u.search = ''
+    return u.href
+  }
+  const whenKeys = () => new Promise((res, rej) => {
+    const t0 = Date.now()
+    const tick = () => (k && room ? res() : Date.now() - t0 > 10000 ? rej(new Error(st.error || 'Encryption keys not ready.')) : setTimeout(tick, 50))
+    tick()
+  })
   start()
   return {
     state: st,
@@ -219,5 +241,24 @@ export function serverTransport(doc, ws, key, url, tabId, hooks = {}, signer = n
       if (ready) enqueue(async () => sendJSON({ t: 'pres', tab: tabId, data: await seal(k, te.encode(JSON.stringify(p))) }))
     },
     close() { closed = true; sock?.close() },
+    /** Encrypt and store a file (image) on the sync server. Returns its id. */
+    async uploadAsset(bytes) {
+      if (st.readOnly) throw new Error('This link is view-only.')
+      if (!k) await whenKeys()
+      const id = b64u(crypto.getRandomValues(new Uint8Array(16)))
+      const body = await sealBytes(k, bytes)
+      const headers = { 'content-type': 'application/octet-stream' }
+      if (signer?.canWrite) headers['x-peerpad-sig'] = b64u(await signer.sign(body))
+      const r = await fetch(assetUrl(id), { method: 'PUT', body, headers })
+      if (!r.ok) throw new Error((await r.text().catch(() => '')) || `Upload failed (${r.status}).`)
+      return id
+    },
+    /** Download and decrypt a stored file. */
+    async fetchAsset(id) {
+      if (!k) await whenKeys()
+      const r = await fetch(assetUrl(id))
+      if (!r.ok) throw new Error(r.status === 404 ? 'Image not found on the sync server.' : `Download failed (${r.status}).`)
+      return unsealBytes(k, new Uint8Array(await r.arrayBuffer()))
+    },
   }
 }

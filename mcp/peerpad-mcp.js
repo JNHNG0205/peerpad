@@ -14,6 +14,7 @@ import * as z from 'zod/v4'
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { serverTransport, newTabId, loadSigner } from '../src/remote.js'
+import { uid, makeBlock, parseMarkdown, blockToMarkdown, listNumbers, rowsOf, rowsToY, TEXT_TYPES } from '../src/model.js'
 
 const CHARACTER_LIMIT = 25000
 const log = (...a) => console.error('[peerpad-mcp]', ...a) // stdout carries the protocol
@@ -72,14 +73,7 @@ async function write(fn, pageId = null) {
   return result
 }
 
-const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4)
-const TYPES = ['p', 'h1', 'h2', 'h3', 'bullet', 'number', 'todo', 'quote', 'callout', 'code', 'divider']
-function makeBlock({ type = 'p', text = '', checked = false, indent = 0 } = {}) {
-  const m = new Y.Map()
-  m.set('id', uid()); m.set('type', type); m.set('text', new Y.Text(text))
-  m.set('checked', !!checked); m.set('indent', indent)
-  return m
-}
+const TYPES = [...TEXT_TYPES, 'divider']
 function applyDiff(ytext, next) {
   const prev = ytext.toString()
   if (prev === next) return
@@ -91,34 +85,6 @@ function applyDiff(ytext, next) {
   if (prev.length - a - b) ytext.delete(a, prev.length - a - b)
   const ins = next.slice(a, next.length - b)
   if (ins) ytext.insert(a, ins)
-}
-
-/** Markdown -> block specs (same block types as the editor). */
-function parseMarkdown(md) {
-  const out = []
-  const lines = String(md).replace(/\r/g, '').split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]
-    if (/^\s*```/.test(l)) {
-      const body = []
-      while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i])
-      out.push({ type: 'code', text: body.join('\n') })
-      continue
-    }
-    if (!l.trim()) continue
-    const indent = Math.min(6, Math.floor(l.match(/^\s*/)[0].replace(/\t/g, '  ').length / 2))
-    const t = l.trim()
-    let m
-    if (/^(---|\*\*\*|___)$/.test(t)) out.push({ type: 'divider' })
-    else if ((m = t.match(/^(#{1,3})\s+(.*)$/))) out.push({ type: 'h' + m[1].length, text: m[2] })
-    else if ((m = t.match(/^[-*+]\s+\[([ xX])\]\s*(.*)$/))) out.push({ type: 'todo', text: m[2], checked: m[1] !== ' ', indent })
-    else if ((m = t.match(/^[-*+]\s+(.*)$/))) out.push({ type: 'bullet', text: m[1], indent })
-    else if ((m = t.match(/^\d+[.)]\s+(.*)$/))) out.push({ type: 'number', text: m[1], indent })
-    else if ((m = t.match(/^>\s?💡\s?(.*)$/))) out.push({ type: 'callout', text: m[1] })
-    else if ((m = t.match(/^>\s?(.*)$/))) out.push({ type: 'quote', text: m[1] })
-    else out.push({ type: 'p', text: t })
-  }
-  return out
 }
 
 /* ------------------------------------------------------------------ read helpers */
@@ -145,31 +111,25 @@ function findBlock(page, blockId) {
   return { i, b: arr[i] }
 }
 function blockJSON(b) {
-  return { id: b.get('id'), type: b.get('type'), text: b.get('text')?.toString() ?? '', checked: !!b.get('checked'), indent: b.get('indent') || 0, ...(b.get('ref') ? { page_ref: b.get('ref') } : {}) }
+  const j = { id: b.get('id'), type: b.get('type'), text: b.get('text')?.toString() ?? '', checked: !!b.get('checked'), indent: b.get('indent') || 0 }
+  if (b.get('ref')) j.page_ref = b.get('ref')
+  if (b.get('rows')) j.rows = rowsOf(b)
+  if (b.get('chart')) j.chart_type = b.get('chart')
+  if (b.get('url')) j.image_url = b.get('url')
+  if (b.get('asset')) j.image = 'encrypted image stored on the sync server'
+  if (b.get('data')) j.image = 'embedded image'
+  return j
 }
-function blockMd(b, n) {
-  const t = b.get('text')?.toString() ?? ''
-  const pad = '  '.repeat(b.get('indent') || 0)
-  switch (b.get('type')) {
-    case 'h1': return `# ${t}`
-    case 'h2': return `## ${t}`
-    case 'h3': return `### ${t}`
-    case 'bullet': return `${pad}- ${t}`
-    case 'number': return `${pad}${n}. ${t}`
-    case 'todo': return `${pad}- [${b.get('checked') ? 'x' : ' '}] ${t}`
-    case 'quote': return `> ${t}`
-    case 'callout': return `> 💡 ${t}`
-    case 'code': return '```\n' + t + '\n```'
-    case 'divider': return '---'
-    case 'pagelink': return `→ sub-page "${title(b.get('ref'))}" (page id: ${b.get('ref')})`
-    default: return `${pad}${t}`
-  }
+const blockMd = (b, n = 1) => {
+  if (b.get('type') === 'pagelink') return `→ sub-page "${title(b.get('ref'))}" (page id: ${b.get('ref')})`
+  return blockToMarkdown(b, n, title)
 }
 const ok = (text, structured) => ({ content: [{ type: 'text', text }], ...(structured ? { structuredContent: structured } : {}) })
 const jsonOk = (data) => ok(JSON.stringify(data, null, 2), data)
 const ResponseFormat = z.enum(['markdown', 'json']).default('markdown').describe("'markdown' for readable text, 'json' for structured data")
 const PageId = z.string().min(1).describe('Page id, e.g. "k2j9x0a1b2c" (from peerpad_list_pages or peerpad_search)')
 const BlockType = z.enum(TYPES).describe('p=text, h1-h3=headings, bullet, number, todo, quote, callout, code, divider')
+const MD_HELP = 'Markdown supported: # headings, - lists, 1. lists, - [ ] to-dos, > quotes, > 💡 callouts, ``` code, ---, inline **bold** *italic* `code` [links](https://…), tables (| a | b | rows), images ![caption](https://…), table of contents [TOC], and charts as a ```chart block containing JSON like {"type":"bar","title":"TVL","rows":[["Month","USD M"],["Oct",27],["Nov",48]]} (type bar or line; first column labels, other columns series).'
 
 /* ------------------------------------------------------------------ server */
 function createServer() {
@@ -210,14 +170,7 @@ function createServer() {
     const p = getPage(page_id)
     const all = p.get('blocks').toArray()
     // numbering for numbered lists, computed over the whole page
-    const nums = []
-    let stack = []
-    for (const b of all) {
-      const ind = b.get('indent') || 0
-      stack.length = ind + 1
-      stack[ind] = b.get('type') === 'number' ? (stack[ind] || 0) + 1 : 0
-      nums.push(stack[ind])
-    }
+    const nums = listNumbers(all)
     const render = (count) => {
       const slice = all.slice(offset, offset + count)
       const next = offset + slice.length
@@ -275,7 +228,7 @@ function createServer() {
 
   server.registerTool('peerpad_create_page', {
     title: 'Create page',
-    description: 'Create a new page, optionally inside another page, with content written in markdown (headings, - lists, 1. lists, - [ ] to-dos, > quotes, > 💡 callouts, ``` code, ---). Returns the new page id. Teammates see it appear live.',
+    description: 'Create a new page, optionally inside another page, with content written in markdown. Returns the new page id. Teammates see it appear live. ' + MD_HELP,
     inputSchema: z.strictObject({
       title: z.string().min(1).max(300).describe('Page title'),
       content_markdown: z.string().max(200000).default('').describe('Page body in markdown; empty for a blank page'),
@@ -301,7 +254,7 @@ function createServer() {
 
   server.registerTool('peerpad_add_content', {
     title: 'Add content to page',
-    description: 'Insert markdown content into an existing page as new blocks: at the end (default), at the start, or right after a given block. Use this to append notes or tasks without touching existing text.',
+    description: 'Insert markdown content into an existing page as new blocks: at the end (default), at the start, or right after a given block. Use this to append notes, tasks, tables or charts without touching existing text. ' + MD_HELP,
     inputSchema: z.strictObject({
       page_id: PageId,
       content_markdown: z.string().min(1).max(200000).describe('Markdown to insert'),
@@ -323,7 +276,7 @@ function createServer() {
 
   server.registerTool('peerpad_update_block', {
     title: 'Update block',
-    description: 'Change one block: its text, type, checked state (to-dos) or indent. Only the fields you pass change. Text edits are merged character by character, so teammates typing elsewhere are not overwritten. Example: check off a to-do with checked=true.',
+    description: 'Change one block: its text (or caption/title for images and charts), type of a text block, checked state (to-dos), indent, the cells of a table or chart (rows), or chart_type. Only the fields you pass change. Text edits are merged character by character, so teammates typing elsewhere are not overwritten. Example: check off a to-do with checked=true.',
     inputSchema: z.strictObject({
       page_id: PageId,
       block_id: z.string().min(1).describe('Block id from peerpad_read_page'),
@@ -331,16 +284,24 @@ function createServer() {
       type: BlockType.optional(),
       checked: z.boolean().optional().describe('For to-do blocks'),
       indent: z.number().int().min(0).max(6).optional().describe('Nesting level for list items'),
+      rows: z.array(z.array(z.string())).min(1).max(500).optional().describe('Table or chart blocks only: all cells, first row = header, e.g. [["Track","Fit"],["Privacy","Main"]]'),
+      chart_type: z.enum(['bar', 'line']).optional().describe('Chart blocks only'),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async ({ page_id, block_id, text, type, checked, indent }) => {
+  }, async ({ page_id, block_id, text, type, checked, indent, rows, chart_type }) => {
     await ready()
     const { b } = findBlock(getPage(page_id), block_id)
+    const bt = b.get('type')
+    if ((rows || chart_type) && bt !== 'table' && bt !== 'chart') throw new Error(`Block ${block_id} is a ${bt} block; rows and chart_type only apply to table and chart blocks.`)
+    if (chart_type && bt !== 'chart') throw new Error('chart_type only applies to chart blocks.')
+    if (type && !TEXT_TYPES.includes(bt) && bt !== 'divider') throw new Error(`A ${bt} block cannot change type. Delete it and add new content with peerpad_add_content instead.`)
     await write(() => {
       if (text !== undefined) applyDiff(b.get('text'), type === 'divider' ? '' : text)
       if (type) b.set('type', type)
       if (checked !== undefined) b.set('checked', checked)
       if (indent !== undefined) b.set('indent', indent)
+      if (rows) b.set('rows', rowsToY(rows))
+      if (chart_type) b.set('chart', chart_type)
     }, page_id)
     return ok(`Updated block ${block_id}: ${blockMd(b, 1)}`)
   })

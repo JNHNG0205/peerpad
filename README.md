@@ -5,6 +5,9 @@ A peer-to-peer collaborative workspace for notes, docs and tasks. No server, no 
 ## Features
 - Nested pages, page icons, breadcrumbs, search (Ctrl+K)
 - Block editor: text, H1–H3, bulleted / numbered / to-do lists, quote, callout, code, divider, sub-page links
+- Rich content: **images** (upload, paste or drop; encrypted on the sync server), **tables** (collaborative cells; paste from a spreadsheet), **charts** (bar or line, drawn from an editable data table), **table of contents**
+- Inline formatting: `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `[links](https://…)` (Ctrl+B / I / E / K), shown formatted when not editing
+- Import Markdown files as pages; export pages as Markdown (tables, charts and images included)
 - `/` command menu, markdown shortcuts (`# `, `- `, `1. `, `[] `, `> `, ```` ``` ````, `---`), Tab to indent, drag to reorder, multi-line paste
 - Real-time collaboration with conflict-free merging (Yjs CRDT), live presence (who is on which page and block)
 - Offline-first: every browser keeps a full copy in IndexedDB; edits merge when peers reconnect
@@ -18,6 +21,7 @@ A peer-to-peer collaborative workspace for notes, docs and tasks. No server, no 
 | P2P transport | WebRTC via Trystero; public Nostr relays are used only for peer discovery |
 | Security | Invite link carries a random workspace ID + key; the key encrypts the WebRTC handshake and never leaves the URL fragment |
 | Permissions | Edit links carry an ECDSA P-256 private key, view links only the public key. Every change is signed; the sync server and peers drop unsigned changes |
+| Images | Shrunk in the browser, encrypted with the workspace key, stored as opaque files on the sync server (`/assets`). Without a server, images up to 1.5 MB are embedded in the page |
 | Same-device tabs | BroadcastChannel |
 | Persistence | IndexedDB |
 

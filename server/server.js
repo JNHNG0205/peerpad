@@ -6,7 +6,7 @@
 //
 // Env: PORT (default 8787), DATA_DIR (default ./data), STATIC_DIR (default ../dist)
 import { createServer } from 'node:http'
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -78,8 +78,65 @@ const broadcast = (r, from, obj) => {
 }
 
 // ---------- HTTP: health + static app ----------
+// ---------- encrypted file storage (images) ----------
+// Browsers encrypt files with the workspace key before upload; the server stores opaque bytes.
+const MAX_ASSET = 10 * 1024 * 1024
+const ASSET_ID_RE = /^[A-Za-z0-9_-]{16,40}$/
+const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, PUT, OPTIONS',
+  'access-control-allow-headers': 'content-type, x-peerpad-sig',
+  'access-control-max-age': '86400',
+}
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('too large')); req.destroy() } else chunks.push(c) })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+async function handleAsset(req, res, room, id) {
+  const file = path.join(DATA, 'assets', room, id)
+  if (req.method === 'OPTIONS') return res.writeHead(204, CORS).end()
+  if (req.method === 'GET') {
+    try {
+      const buf = await readFile(file)
+      res.writeHead(200, { ...CORS, 'content-type': 'application/octet-stream', 'cache-control': 'private, max-age=31536000, immutable' })
+      return res.end(buf)
+    } catch { return res.writeHead(404, CORS).end('Not found') }
+  }
+  if (req.method === 'PUT') {
+    let body
+    try { body = await readBody(req, MAX_ASSET) } catch { return res.writeHead(413, CORS).end('File is larger than 10 MB.') }
+    const r = await getRoom(room)
+    try {
+      if (r.pub) {
+        // workspaces with view-only links: only editors (valid signature) may upload
+        const verify = await verifier(r)
+        const sig = String(req.headers['x-peerpad-sig'] || '')
+        const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, r.verifyKey, unb64u(sig), body).catch(() => false)
+        if (!verify || !ok) return res.writeHead(403, CORS).end('This link is view-only.')
+      }
+      try { await stat(file); return res.writeHead(409, CORS).end('Already exists') } catch {}
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, body)
+      return res.writeHead(201, CORS).end('Stored')
+    } finally {
+      if (!r.clients.size && !r.timer) rooms.delete(room)
+    }
+  }
+  res.writeHead(405, CORS).end()
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  const asset = url.pathname.match(/\/assets\/([a-f0-9]{64})\/([^/]+)$/)
+  if (asset) {
+    if (!ASSET_ID_RE.test(asset[2])) return res.writeHead(400, CORS).end('Bad id')
+    return handleAsset(req, res, asset[1], asset[2])
+  }
   if (url.pathname.endsWith('/peerpad-health')) {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size }))

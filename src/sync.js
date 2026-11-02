@@ -185,5 +185,7 @@ export function connect(doc, ws, key, serverUrl = null, signer = null) {
     },
     status: () => ({ p2p: p2pCount, error: relayError, server: srv ? srv.state.status : null, serverError: srv?.state.error, readOnly: readOnly() }),
     leave: () => room?.leave(),
+    /** Encrypted file storage on the sync server; null without a server. */
+    assets: srv ? { upload: (bytes) => srv.uploadAsset(bytes), fetch: (id) => srv.fetchAsset(id) } : null,
   }
 }

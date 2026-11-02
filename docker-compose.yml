@@ -1,0 +1,26 @@
+# Self-host PeerPad + automatic HTTPS (Caddy gets a free Let's Encrypt certificate).
+# Usage:  echo "DOMAIN=notes.example.com" > .env && docker compose up -d --build
+services:
+  peerpad:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - peerpad-data:/data
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - peerpad
+volumes:
+  peerpad-data:
+  caddy-data:
+  caddy-config:

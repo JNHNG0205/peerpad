@@ -33,6 +33,11 @@ npm start        # http://localhost:8787  (PORT, DATA_DIR env vars)
 
 ### Deploy
 - **Render**: push this repo to GitHub → render.com → New → Blueprint → pick the repo (uses `render.yaml`, includes a 1 GB persistent disk).
+- **DigitalOcean droplet / any VPS** (includes automatic HTTPS):
+  ```bash
+  echo "DOMAIN=notes.example.com" > .env   # or 203-0-113-5.sslip.io if you have no domain
+  docker compose up -d --build
+  ```
 - **Any Docker host** (Fly.io, Railway, a VPS): `docker build -t peerpad . && docker run -p 8787:8787 -v peerpad:/data peerpad`
 - Put it behind HTTPS (Render/Fly/Railway do this for you). Keep `/data` on a persistent volume or workspaces are lost on redeploy.
 

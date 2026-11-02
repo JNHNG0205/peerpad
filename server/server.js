@@ -179,7 +179,7 @@ const MCP_UPSTREAM = process.env.MCP_UPSTREAM ? new URL(process.env.MCP_UPSTREAM
 function proxyMcp(req, res) {
   const up = httpRequest({
     hostname: MCP_UPSTREAM.hostname, port: MCP_UPSTREAM.port, path: req.url, method: req.method,
-    headers: { ...req.headers, 'x-forwarded-host': req.headers.host, 'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http' },
+    headers: { ...req.headers, 'x-forwarded-for': [req.headers['x-forwarded-for'], req.socket.remoteAddress].filter(Boolean).join(', '), 'x-forwarded-host': req.headers.host, 'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http' },
   }, (r) => { res.writeHead(r.statusCode || 502, r.headers); r.pipe(res) })
   up.on('error', () => { if (!res.headersSent) res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'AI connections are not enabled on this server.' })) })
   req.pipe(up)

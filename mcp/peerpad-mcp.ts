@@ -497,6 +497,8 @@ async function serveHttp() {
   const port = Number(process.env.PORT || 3333)
   const allowedHosts = process.env.MCP_ALLOWED_HOSTS?.split(',').map((x) => x.trim()).filter(Boolean)
   const app = createMcpExpressApp(allowedHosts?.length ? { host, allowedHosts } : { host })
+  // requests arrive through Caddy or the PeerPad server: use the visitor's address they forward, not the proxy's
+  app.set('trust proxy', 'loopback, linklocal, uniquelocal')
   const { OAuthStore, OAuthError } = await import('./oauth.ts')
   const express = (await import('express')).default
   const dataDir = process.env.DATA_DIR || new URL('../data/mcp', import.meta.url).pathname
@@ -526,13 +528,15 @@ async function serveHttp() {
     for (const [id, p] of live) { const l = await p.catch(() => null); if (!l || Date.now() - l.used > 10 * 60_000) closeLive(id) }
   }, 60_000).unref()
 
-  // simple per-IP rate limit for creating connections
+  // simple per-IP rate limit (per hour). Attempts count; failed ones are given back with undo()
   const hits = new Map<string, number[]>()
-  const limited = (ip: string, max = 20) => {
-    const now = Date.now(), h = (hits.get(ip) || []).filter((t) => now - t < 3600_000)
-    h.push(now); hits.set(ip, h)
-    return h.length > max
+  const limited = (key: string, max = 20) => {
+    const now = Date.now(), h = (hits.get(key) || []).filter((t) => now - t < 3600_000)
+    if (h.length >= max) { hits.set(key, h); return true }
+    h.push(now); hits.set(key, h)
+    return false
   }
+  const undo = (key: string) => { hits.get(key)?.pop() }
   async function verifyProof(body: any, action: 'list' | 'revoke' | 'revoke-all', id = '') {
     const { pk, ts, sig } = body || {}
     if (typeof pk !== 'string' || typeof sig !== 'string' || typeof ts !== 'number') return false
@@ -549,7 +553,9 @@ async function serveHttp() {
   app.get('/mcp/agents/status', (_req: any, res: any) => res.json({ enabled: true }))
 
   app.post('/mcp/agents', async (req: any, res: any) => {
-    if (limited(req.ip)) return fail(res, 429, 'Too many new AI connections from this network. Try again in an hour.')
+    const rl = 'create:' + req.ip
+    if (limited(rl)) return fail(res, 429, 'Too many new AI connections from this network. Try again in an hour.')
+    res.on('finish', () => { if (res.statusCode >= 400) undo(rl) })
     const { invite, name, agent, access } = req.body || {}
     if (!['claude', 'codex', 'other'].includes(agent) || !['edit', 'view'].includes(access)) return fail(res, 400, 'Choose an agent and an access level.')
     const label = String(name || '').trim().slice(0, 60) || 'AI assistant'
@@ -641,7 +647,9 @@ async function serveHttp() {
   })
   // the approval page sends the chosen workspaces (their links stay encrypted at rest, see oauth.ts)
   app.post('/mcp/oauth/approve', async (req: any, res: any) => {
-    if (limited(req.ip)) return res.status(429).json({ error: 'slow_down', error_description: 'Too many approvals from this network. Try again in an hour.' })
+    const rl = 'approve:' + req.ip
+    if (limited(rl)) return res.status(429).json({ error: 'slow_down', error_description: 'Too many approvals from this network. Try again in an hour.' })
+    res.on('finish', () => { if (res.statusCode >= 400) undo(rl) })
     const b = req.body || {}
     // the app names this server's /mcp address (some apps add a trailing slash or omit the path)
     const norm = (u: string) => { try { const x = new URL(u); return x.origin + x.pathname.replace(/\/+$/, '') } catch { return '' } }

@@ -1,4 +1,10 @@
 {$DOMAIN} {
 	encode gzip
-	reverse_proxy peerpad:8787
+	# AI access (only answers when the optional mcp service is running)
+	handle /mcp* {
+		reverse_proxy mcp:3333
+	}
+	handle {
+		reverse_proxy peerpad:8787
+	}
 }

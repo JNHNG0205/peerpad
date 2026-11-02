@@ -48,3 +48,34 @@ npm run dev      # http://localhost:5173
 npm run build    # -> dist/index.html (single self-contained file)
 ```
 Host `dist/index.html` on any static host (GitHub Pages, Netlify, Cloudflare Pages). HTTPS is required for WebRTC (localhost is fine).
+
+## AI access (MCP server)
+`mcp/peerpad-mcp.js` lets AI tools read and edit a workspace: list, read and search pages; create pages from markdown; add, update and delete blocks; rename, move and delete pages. The AI joins like a teammate: edits appear live, and it shows up under "People here" while working.
+
+It needs the workspace's invite link (Share button) and a sync server.
+
+### Local (Claude Desktop, Claude Code, Cursor): recommended
+The key stays on your computer; the server still sees only encrypted data.
+```json
+{
+  "mcpServers": {
+    "peerpad": {
+      "command": "node",
+      "args": ["/path/to/peerpad/mcp/peerpad-mcp.js"],
+      "env": { "PEERPAD_INVITE": "https://notes.example.com/#ws=...&key=..." }
+    }
+  }
+}
+```
+Claude Code: `claude mcp add peerpad -e PEERPAD_INVITE='<link>' -- node /path/to/peerpad/mcp/peerpad-mcp.js`
+
+### Remote (claude.ai custom connector, any device)
+Runs on the droplet next to the sync server. Trade-off: the droplet then holds the workspace key, so whoever controls the droplet can read that workspace.
+```bash
+echo "PEERPAD_INVITE=https://notes.example.com/#ws=...&key=..." >> .env
+echo "MCP_TOKEN=$(openssl rand -hex 24)" >> .env
+docker compose --profile mcp up -d --build
+```
+Connector URL: `https://notes.example.com/mcp/<MCP_TOKEN>` (or send `Authorization: Bearer <MCP_TOKEN>` to `/mcp`).
+
+Self-check: `PEERPAD_INVITE='<link>' npm run mcp:smoke` (creates and deletes a test page).

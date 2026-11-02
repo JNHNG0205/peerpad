@@ -20,6 +20,23 @@ services:
       - caddy-config:/config
     depends_on:
       - peerpad
+  # Optional AI access (MCP). Enable with:  docker compose --profile mcp up -d --build
+  # Needs PEERPAD_INVITE and MCP_TOKEN in .env. Reachable at https://$DOMAIN/mcp
+  mcp:
+    build: .
+    profiles: ["mcp"]
+    restart: unless-stopped
+    command: ["node", "mcp/peerpad-mcp.js"]
+    environment:
+      - TRANSPORT=http
+      - HOST=0.0.0.0
+      - PORT=3333
+      - MCP_ALLOWED_HOSTS=${DOMAIN}
+      - PEERPAD_INVITE=${PEERPAD_INVITE:-}
+      - MCP_TOKEN=${MCP_TOKEN:-}
+      - PEERPAD_AI_NAME=${PEERPAD_AI_NAME:-AI assistant}
+    depends_on:
+      - caddy
 volumes:
   peerpad-data:
   caddy-data:

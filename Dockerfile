@@ -11,6 +11,8 @@ ENV NODE_ENV=production DATA_DIR=/data PORT=8787
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY server ./server
+COPY src ./src
+COPY mcp ./mcp
 COPY --from=build /app/dist ./dist
 VOLUME /data
 EXPOSE 8787

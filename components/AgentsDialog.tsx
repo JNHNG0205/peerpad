@@ -112,7 +112,7 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
                 <ul className="flex flex-col divide-y divide-line rounded-xl border border-line">
                   {rows.map((c) => (
                     <li key={c.id} className="flex items-center gap-3 px-3 py-2.5">
-                      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-hover text-muted">{c.agent === 'codex' ? <Terminal size={15} /> : <Sparkles size={15} />}</span>
+                      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-hover text-muted">{c.agent === 'codex' ? <Terminal size={15} /> : c.agent === 'claude' ? <Sparkles size={15} /> : <Bot size={15} />}</span>
                       <div className="min-w-0 flex-1 leading-tight">
                         <div className="truncate font-medium">{c.name}{c.own && <span className="ml-1.5 text-xs font-normal text-faint">yours</span>}</div>
                         <div className="text-xs text-muted">{c.access === 'edit' ? 'Can edit' : 'Can view'} · added {when(c.createdAt)} · last used {when(c.lastUsedAt)}</div>
@@ -205,6 +205,7 @@ function OneStep({ address }: { address: string }) {
     { label: 'Claude', steps: ['In Claude, open Settings → Connectors → Add custom connector.', 'Name it PeerPad and paste the address above, then click Add.', 'Click Connect: PeerPad opens so you can choose workspaces and approve.'] },
     { label: 'Claude Code', steps: ['Run this, then type /mcp in Claude Code and choose PeerPad → Authenticate:'], code: `claude mcp add --transport http peerpad ${address}` },
     { label: 'Codex', steps: ['Run these in a terminal; the second opens PeerPad to approve:'], code: `codex mcp add peerpad --url ${address}\ncodex mcp login peerpad` },
+    { label: 'ChatGPT', steps: ['In ChatGPT settings, turn on Developer mode (under Apps & Connectors → Advanced; needs a plan that allows it).', 'Create a connector: name PeerPad, paste the address above, Authentication: OAuth, then Create.', 'ChatGPT opens PeerPad: choose workspaces and approve. Then enable PeerPad in a chat under Developer mode.'] },
   ]
   const t = tabs[tab]
   return (

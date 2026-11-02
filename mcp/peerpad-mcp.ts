@@ -642,7 +642,9 @@ async function serveHttp() {
   app.post('/mcp/oauth/approve', async (req: any, res: any) => {
     if (limited(req.ip)) return res.status(429).json({ error: 'slow_down', error_description: 'Too many approvals from this network. Try again in an hour.' })
     const b = req.body || {}
-    if (b.resource && b.resource !== `${publicBase(req)}/mcp`) return res.status(400).json({ error: 'invalid_target', error_description: 'This approval is for another server.' })
+    // the app names this server's /mcp address (some apps add a trailing slash or omit the path)
+    const norm = (u: string) => { try { const x = new URL(u); return x.origin + x.pathname.replace(/\/+$/, '') } catch { return '' } }
+    if (b.resource && ![`${publicBase(req)}/mcp`, publicBase(req)].includes(norm(String(b.resource)))) return res.status(400).json({ error: 'invalid_target', error_description: 'This approval is for another server.' })
     const chosen: { invite: Invite; access: 'edit' | 'view'; label: string; pk: string | null }[] = []
     for (const w of Array.isArray(b.workspaces) ? b.workspaces.slice(0, 20) : []) {
       let cfg: Invite

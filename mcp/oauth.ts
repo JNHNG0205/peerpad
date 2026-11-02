@@ -58,7 +58,7 @@ function redirectMatches(registered: string[], given: string): boolean {
   })
 }
 export function agentKindOf(name: string): AgentKind {
-  return /claude/i.test(name) ? 'claude' : /codex|openai|chatgpt/i.test(name) ? 'codex' : 'other'
+  return /claude/i.test(name) ? 'claude' : /codex/i.test(name) ? 'codex' : 'other' // ChatGPT and others: generic icon
 }
 
 export class OAuthStore {

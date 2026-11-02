@@ -42,7 +42,7 @@ const WELCOME = `> 👋 Everything here is end-to-end encrypted: your PeerPad se
 | --- | --- |
 | Search | Ctrl+K |
 | Dark mode | Bottom of the sidebar |
-| AI agents (Claude, Codex) | AI agents button, top right |
+| AI agents (Claude, ChatGPT, Codex) | AI agents button, top right |
 `
 
 export default function App() {

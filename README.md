@@ -10,7 +10,7 @@ Built with Next.js, React, TypeScript, Tailwind CSS, Motion and [BlockNote](http
 - Real-time collaboration with live cursors and names; edits merge without conflicts
 - Nested pages with icons, breadcrumbs, and search (Ctrl+K) over titles and the text of pages you have opened
 - Share links with **Can edit** or **Can view** access, enforced by the server
-- **AI agents**: connect Claude or Codex from the app, with edit or view access, and disconnect them any time
+- **AI agents**: connect Claude, ChatGPT or Codex from the app, with edit or view access, and disconnect them any time
 - Light, dark and system themes; works on phones
 - Works offline: each browser keeps a copy and syncs when it reconnects
 - Import Markdown files as pages; export pages as Markdown (charts, tables and images included)
@@ -95,11 +95,12 @@ Links contain the workspace key, so share them privately. There are no accounts:
 
 Workspaces created before view links existed have a single link that can edit. **Share → Turn on view-only links** upgrades them; older links then become view-only, so send editors the new edit link.
 
-## AI agents (Claude, Codex)
+## AI agents (Claude, ChatGPT, Codex)
 AI apps connect with one address, `https://<your-domain>/mcp`, and sign in the way apps usually do: PeerPad opens in your browser, you choose workspaces and access, click **Allow**, and you're sent back.
 
 - **Claude (web, desktop, mobile):** Settings → Connectors → **Add custom connector** → name `PeerPad`, address `https://<your-domain>/mcp` → Add → **Connect**, then approve in PeerPad.
 - **Claude Code:** `claude mcp add --transport http peerpad https://<your-domain>/mcp`, then `/mcp` in Claude Code → PeerPad → **Authenticate**.
+- **ChatGPT:** Settings → Apps & Connectors → Advanced → turn on **Developer mode** (needs a plan that allows it). Then **Create** a connector: name `PeerPad`, address `https://<your-domain>/mcp`, Authentication **OAuth** → approve in PeerPad. In a chat, turn on Developer mode and pick PeerPad. (ChatGPT's memory is off in Developer mode.)
 - **Codex:** `codex mcp add peerpad --url https://<your-domain>/mcp`, then `codex mcp login peerpad`.
 
 The same steps are in the app under **AI agents**. On the approval page you can pick several workspaces and give each **Edit** or **View** access; the agent then has a `peerpad_list_workspaces` tool and a `workspace` argument on the other tools. It can list, read and search pages; create pages from Markdown (with tables, charts and images); add, edit and delete blocks; and rename, move and delete pages. It appears under **People here** while it works, and its edits show up live.

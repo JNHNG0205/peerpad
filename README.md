@@ -96,23 +96,24 @@ Links contain the workspace key, so share them privately. There are no accounts:
 Workspaces created before view links existed have a single link that can edit. **Share → Turn on view-only links** upgrades them; older links then become view-only, so send editors the new edit link.
 
 ## AI agents (Claude, Codex)
-Anyone in a workspace can connect an AI agent from the app; nobody needs server access.
+AI apps connect with one address, `https://<your-domain>/mcp`, and sign in the way apps usually do: PeerPad opens in your browser, you choose workspaces and access, click **Allow**, and you're sent back.
 
-1. Click **AI agents** (top right).
-2. Pick **Claude** or **Codex**, choose **Can edit** or **Can view**, and click **Connect**. People with a view link can only connect read-only agents.
-3. Copy the address it shows and follow the steps on screen:
-   - **Claude (web, desktop, mobile):** Settings → Connectors → **Add custom connector** → name it `PeerPad`, paste the address → Add. Then turn PeerPad on in a chat's tools menu.
-   - **Claude Code:** `claude mcp add --transport http peerpad "<address>"`
-   - **Codex:** `codex mcp add peerpad --url "<address>"`, or add `[mcp_servers.peerpad]` with `url = "<address>"` to `~/.codex/config.toml`.
+- **Claude (web, desktop, mobile):** Settings → Connectors → **Add custom connector** → name `PeerPad`, address `https://<your-domain>/mcp` → Add → **Connect**, then approve in PeerPad.
+- **Claude Code:** `claude mcp add --transport http peerpad https://<your-domain>/mcp`, then `/mcp` in Claude Code → PeerPad → **Authenticate**.
+- **Codex:** `codex mcp add peerpad --url https://<your-domain>/mcp`, then `codex mcp login peerpad`.
 
-Then ask, for example: *"List my PeerPad pages"*, *"Add today's meeting notes to Project tasks"*, *"Create a page with a bar chart of our monthly signups"*. The agent can list, read and search pages; create pages from Markdown (with tables, charts and images); add, edit and delete blocks; and rename, move and delete pages. It appears under **People here** while it works, and its edits show up live.
+The same steps are in the app under **AI agents**. On the approval page you can pick several workspaces and give each **Edit** or **View** access; the agent then has a `peerpad_list_workspaces` tool and a `workspace` argument on the other tools. It can list, read and search pages; create pages from Markdown (with tables, charts and images); add, edit and delete blocks; and rename, move and delete pages. It appears under **People here** while it works, and its edits show up live.
 
-**Managing connections:** the same dialog lists your connections. Editors see every AI connection in the workspace and can disconnect any of them; a disconnected address stops working immediately.
+Then ask, for example: *"List my PeerPad pages"*, *"Add today's meeting notes to Project tasks"*, *"Create a page with a bar chart of our monthly signups"*.
 
-**Privacy:** each connection address contains a secret. The server stores the connection's workspace link encrypted with that secret and keeps only a hash of it, so its files on disk reveal nothing. While an agent is working, the server decrypts that workspace to answer it; when the agent is idle, the server cannot read it. Treat connection addresses like passwords.
+**Managing connections:** **AI agents** lists the apps connected to the workspace. Editors see every connection and can disconnect any of them; a disconnected app loses access immediately (it would have to be approved again).
+
+**For apps without sign-in support:** **AI agents → Create a personal address** gives a private address with the secret built in, to paste into the app.
+
+**Privacy:** the approval page runs in your browser, where the workspace keys are. The server stores each approved workspace link encrypted with secrets that only the AI app holds (inside its access and refresh tokens) and keeps only hashes of those secrets, so its files reveal nothing. While an agent is working, the server decrypts that workspace to answer it; when the agent is idle, the server cannot read it. Access tokens last an hour and are refreshed automatically; refresh tokens rotate on every use and expire after 60 days without use.
 
 ### For whoever runs the server
-AI agents are on by default in the Docker setup (the `mcp` service). Connections are stored in the `peerpad_mcp-data` volume. Health check: `curl -s https://notes.example.com/mcp/agents/status` should print `{"enabled":true}`. If it prints an error saying requests arrive at the PeerPad server, Caddy is running an old config: `docker compose up -d --force-recreate caddy`.
+AI agents are on by default in the Docker setup (the `mcp` service). Connections are stored in the `peerpad_mcp-data` volume. Health check: `curl -s https://notes.example.com/mcp/agents/status` should print `{"enabled":true}`, and `curl -s https://notes.example.com/.well-known/oauth-authorization-server` should print the sign-in endpoints. If it prints an error saying requests arrive at the PeerPad server, Caddy is running an old config: `docker compose up -d --force-recreate caddy`.
 
 Running without Docker: start the AI service with `TRANSPORT=http PORT=3333 DATA_DIR=./data/mcp PEERPAD_SYNC_URL=http://127.0.0.1:8787 node mcp/peerpad-mcp.ts` and the server with `MCP_UPSTREAM=http://127.0.0.1:3333 npm start`, which forwards `/mcp` to it.
 

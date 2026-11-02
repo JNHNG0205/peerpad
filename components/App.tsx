@@ -49,11 +49,13 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    startSession().then(setSession).catch((e) => setError(String(e?.message || e)))
-    const onHash = () => { const p = params(); if (session && p.get('ws') && p.get('ws') !== session.ws) location.reload() }
+    let current: string | null = null
+    startSession().then((s) => { current = s.ws; setSession(s) }).catch((e) => setError(String(e?.message || e)))
+    // switching to another workspace (menu, invite link) reloads the app for that workspace
+    const onHash = () => { const ws = params().get('ws'); if (current && ws && ws !== current) location.reload() }
     addEventListener('hashchange', onHash)
     return () => removeEventListener('hashchange', onHash)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
   if (error) return <Splash message={`Could not open the workspace: ${error}`} />
   if (!session) return <Splash />
   return (

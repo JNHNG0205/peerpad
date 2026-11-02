@@ -14,17 +14,17 @@ type Record = AgentConnection & {
   pk: string | null  // workspace public key (public information) so editors can list/revoke
 }
 
-const b64u = (b: Buffer) => b.toString('base64url')
-const sha256 = (s: string) => createHash('sha256').update(s).digest()
+export const b64u = (b: Buffer) => b.toString('base64url')
+export const sha256 = (s: string) => createHash('sha256').update(s).digest()
 const keyFor = (secret: string) => sha256('peerpad-connector-key:' + secret)
 
-function seal(secret: string, invite: Invite): string {
+export function seal(secret: string, invite: Invite): string {
   const iv = randomBytes(12)
   const c = createCipheriv('aes-256-gcm', keyFor(secret), iv)
   const ct = Buffer.concat([c.update(JSON.stringify(invite), 'utf8'), c.final()])
   return b64u(Buffer.concat([iv, c.getAuthTag(), ct]))
 }
-function open(secret: string, blob: string): Invite {
+export function open(secret: string, blob: string): Invite {
   const buf = Buffer.from(blob, 'base64url')
   const d = createDecipheriv('aes-256-gcm', keyFor(secret), buf.subarray(0, 12))
   d.setAuthTag(buf.subarray(12, 28))

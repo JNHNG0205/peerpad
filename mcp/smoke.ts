@@ -19,7 +19,8 @@ const text = (r: any): string => r.content[0].text
 
 const { tools } = await client.listTools()
 console.error('tools:', tools.map((t) => t.name).join(', '))
-assert.equal(tools.length, 10)
+assert.equal(tools.length, 11)
+assert.match(text(await call('peerpad_list_workspaces')), /can edit/)
 console.error(text(await call('peerpad_list_pages')).split('\n').slice(0, 4).join('\n'))
 
 const md = [

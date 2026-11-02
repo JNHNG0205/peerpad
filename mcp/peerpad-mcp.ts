@@ -175,17 +175,36 @@ const PageId = z.string().min(1).describe('Page id, e.g. "k2j9x0a1b2c" (from pee
 const MD_HELP = 'Markdown supported: # headings, - lists, 1. lists, - [ ] to-dos, > quotes, > 💡 callouts (any emoji), ``` code, ---, **bold** *italic* `code` [links](https://…), tables (| a | b |), images ![caption](https://…), table of contents [TOC], and charts as a ```chart block containing JSON like {"type":"bar","title":"TVL","rows":[["Month","USD M"],["Oct","27"],["Nov","48"]]} (type bar or line; first column labels, other columns one series each).'
 
 /* ------------------------------------------------------------------ MCP tools */
-export function createServerFor(W: WS) {
+/** Which workspaces a connection can use. One-workspace connections ignore the workspace argument. */
+export type Resolver = { list(): { id: string; name: string; access: 'edit' | 'view' }[]; get(id?: string): Promise<WS> }
+export const single = (W: WS): Resolver => ({
+  list: () => [{ id: 'default', name: (W.meta.get('name') as string) || 'Shared workspace', access: W.readOnly() ? 'view' : 'edit' }],
+  get: async () => W,
+})
+const WorkspaceParam = z.string().max(120).optional().describe('Workspace id or name from peerpad_list_workspaces. Only needed when this connection can use more than one workspace.')
+
+export function createServerFor(R: Resolver) {
   return () => {
-    const server = new McpServer({ name: 'peerpad-mcp-server', version: '2.0.0' })
+    const server = new McpServer({ name: 'peerpad-mcp-server', version: '2.1.0' })
     const RO = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+
+    server.registerTool('peerpad_list_workspaces', {
+      title: 'List workspaces',
+      description: 'List the PeerPad workspaces this connection can use, with their ids and access (edit or view). Pass a workspace id or name as `workspace` to the other tools when there is more than one.',
+      inputSchema: z.strictObject({}),
+      annotations: RO,
+    }, async () => {
+      const list = R.list()
+      return ok(list.map((w) => `- ${w.name} (workspace: ${w.id}, ${w.access === 'edit' ? 'can edit' : 'view only'})`).join('\n'), { workspaces: list })
+    })
 
     server.registerTool('peerpad_list_pages', {
       title: 'List pages',
       description: 'List every page in the PeerPad workspace as a tree with page ids and icons. Start here to find a page id. To find pages by their content, use peerpad_search.',
-      inputSchema: z.strictObject({ response_format: ResponseFormat }),
+      inputSchema: z.strictObject({ workspace: WorkspaceParam, response_format: ResponseFormat }),
       annotations: RO,
-    }, async ({ response_format }) => {
+    }, async ({ workspace, response_format }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const rows: { id: string; title: string; icon: string; parent_id: string | null; depth: number }[] = []
       const walk = (parent: string | null, depth: number) => childrenOf(W.pages, parent).forEach((id) => {
@@ -203,14 +222,15 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_read_page', {
       title: 'Read page',
       description: 'Read one page: title, icon, location, and its blocks as Markdown. In markdown mode each top-level block starts with its block id in brackets, e.g. "[3f2a…] - Buy milk". Use those ids with peerpad_update_block, peerpad_delete_block, or as after_block_id in peerpad_add_content.',
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         page_id: PageId,
         offset: z.number().int().min(0).default(0).describe('Index of the first top-level block to return, for long pages'),
         limit: z.number().int().min(1).max(500).default(200).describe('Maximum number of top-level blocks to return'),
         response_format: ResponseFormat,
       }),
       annotations: RO,
-    }, async ({ page_id, offset, limit, response_format }) => {
+    }, async ({ workspace, page_id, offset, limit, response_format }) => {
+      const W = await R.get(workspace)
       await W.ready()
       getPage(W, page_id)
       const all = await pageBlocks(W, page_id)
@@ -250,14 +270,15 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_search', {
       title: 'Search workspace',
       description: 'Find pages and blocks containing some text (case-insensitive). Returns page ids, block ids and snippets. Example: query "launch checklist".',
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         query: z.string().min(2).max(200).describe('Text to look for in page titles and content'),
         limit: z.number().int().min(1).max(100).default(30).describe('Maximum matches to return'),
         offset: z.number().int().min(0).default(0).describe('Matches to skip, for pagination'),
         response_format: ResponseFormat,
       }),
       annotations: RO,
-    }, async ({ query, limit, offset, response_format }) => {
+    }, async ({ workspace, query, limit, offset, response_format }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const q = query.toLowerCase()
       const hits: { page_id: string; page_title: string; block_id: string | null; snippet: string }[] = []
@@ -287,14 +308,15 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_create_page', {
       title: 'Create page',
       description: 'Create a new page, optionally inside another page, with content written in Markdown. Returns the new page id. Teammates see it appear live. ' + MD_HELP,
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         title: z.string().min(1).max(300).describe('Page title'),
         content_markdown: z.string().max(200000).default('').describe('Page body in Markdown; empty for a blank page'),
         parent_id: z.string().optional().describe('Put the page inside this page (page id); omit for a top-level page'),
         icon: z.string().max(8).default('').describe('Optional emoji icon, e.g. "📝"'),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async ({ title, content_markdown, parent_id, icon }) => {
+    }, async ({ workspace, title, content_markdown, parent_id, icon }) => {
+      const W = await R.get(workspace)
       await W.ready()
       if (parent_id) getPage(W, parent_id)
       const blocks = content_markdown.trim() ? await markdownToBlocks(editor, content_markdown) : []
@@ -307,14 +329,15 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_add_content', {
       title: 'Add content to page',
       description: 'Insert Markdown content into an existing page as new blocks: at the end (default), at the start, or right after a given block. Use this to append notes, tasks, tables or charts without touching existing text. ' + MD_HELP,
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         page_id: PageId,
         content_markdown: z.string().min(1).max(200000).describe('Markdown to insert'),
         position: z.enum(['end', 'start']).default('end').describe('Where to insert when after_block_id is not given'),
         after_block_id: z.string().optional().describe('Insert right after this block (id from peerpad_read_page)'),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async ({ page_id, content_markdown, position, after_block_id }) => {
+    }, async ({ workspace, page_id, content_markdown, position, after_block_id }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const blocks = await pageBlocks(W, page_id)
       const added = await markdownToBlocks(editor, content_markdown)
@@ -329,7 +352,7 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_update_block', {
       title: 'Update block',
       description: 'Change one block. Pass markdown to rewrite it (e.g. "## New heading" or "- [x] Done task"), checked to tick a to-do, or for charts chart_rows / chart_type / chart_title. Other blocks are not touched. Example: check off a to-do with checked=true.',
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         page_id: PageId,
         block_id: z.string().min(1).describe('Block id from peerpad_read_page'),
         markdown: z.string().max(100000).optional().describe('New content for this block in Markdown; may become several blocks'),
@@ -339,7 +362,8 @@ export function createServerFor(W: WS) {
         chart_title: z.string().max(300).optional().describe('Chart blocks only'),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    }, async ({ page_id, block_id, markdown, checked, chart_rows, chart_type, chart_title }) => {
+    }, async ({ workspace, page_id, block_id, markdown, checked, chart_rows, chart_type, chart_title }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const blocks = await pageBlocks(W, page_id)
       const f = mustFind(blocks, block_id)
@@ -366,9 +390,10 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_delete_block', {
       title: 'Delete block',
       description: 'Delete one block (and anything nested inside it) from a page. Confirm with the user before deleting content they wrote.',
-      inputSchema: z.strictObject({ page_id: PageId, block_id: z.string().min(1).describe('Block id from peerpad_read_page') }),
+      inputSchema: z.strictObject({ workspace: WorkspaceParam, page_id: PageId, block_id: z.string().min(1).describe('Block id from peerpad_read_page') }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    }, async ({ page_id, block_id }) => {
+    }, async ({ workspace, page_id, block_id }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const blocks = await pageBlocks(W, page_id)
       const f = mustFind(blocks, block_id)
@@ -381,9 +406,10 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_replace_page_content', {
       title: 'Replace page content',
       description: 'Replace ALL content of a page with new Markdown (the title stays). Use for rewrites or reformatting. For small changes prefer peerpad_update_block or peerpad_add_content, which keep teammates\' concurrent edits. ' + MD_HELP,
-      inputSchema: z.strictObject({ page_id: PageId, content_markdown: z.string().max(200000).describe('The new page body in Markdown') }),
+      inputSchema: z.strictObject({ workspace: WorkspaceParam, page_id: PageId, content_markdown: z.string().max(200000).describe('The new page body in Markdown') }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    }, async ({ page_id, content_markdown }) => {
+    }, async ({ workspace, page_id, content_markdown }) => {
+      const W = await R.get(workspace)
       await W.ready()
       getPage(W, page_id)
       const blocks = await markdownToBlocks(editor, content_markdown)
@@ -394,14 +420,15 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_update_page', {
       title: 'Update page',
       description: 'Rename a page, change its icon, or move it inside another page (or to the top level with parent_id=null). Only the fields you pass change.',
-      inputSchema: z.strictObject({
+      inputSchema: z.strictObject({ workspace: WorkspaceParam,
         page_id: PageId,
         title: z.string().min(1).max(300).optional().describe('New title'),
         icon: z.string().max(8).optional().describe('New emoji icon, or "" to remove'),
         parent_id: z.string().nullable().optional().describe('Move inside this page id; null moves it to the top level'),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    }, async ({ page_id, title, icon, parent_id }) => {
+    }, async ({ workspace, page_id, title, icon, parent_id }) => {
+      const W = await R.get(workspace)
       await W.ready()
       const p = getPage(W, page_id)
       if (parent_id) {
@@ -420,9 +447,10 @@ export function createServerFor(W: WS) {
     server.registerTool('peerpad_delete_page', {
       title: 'Delete page',
       description: 'Delete a page and every page inside it, for everyone in the workspace. Confirm with the user first.',
-      inputSchema: z.strictObject({ page_id: PageId }),
+      inputSchema: z.strictObject({ workspace: WorkspaceParam, page_id: PageId }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-    }, async ({ page_id }) => {
+    }, async ({ workspace, page_id }) => {
+      const W = await R.get(workspace)
       await W.ready()
       getPage(W, page_id)
       const all = descendantsOf(W.pages, page_id)
@@ -443,7 +471,7 @@ else if (isMain) {
   // stdio: one workspace, for AI apps that start the server themselves
   const W = await openWorkspace(parseInvite(process.env.PEERPAD_INVITE), process.env.PEERPAD_AI_NAME || 'AI assistant')
   W.ready().then(() => log('connected', W.readOnly() ? '(view-only link)' : '')).catch((e) => log(e.message))
-  serveStdio(createServerFor(W))
+  serveStdio(createServerFor(single(W)))
   // exit when the AI client that started us goes away (otherwise the sync connection keeps us alive)
   const bye = () => { W.close(); process.exit(0) }
   process.stdin.on('end', bye)
@@ -468,8 +496,13 @@ async function serveHttp() {
   const port = Number(process.env.PORT || 3333)
   const allowedHosts = process.env.MCP_ALLOWED_HOSTS?.split(',').map((x) => x.trim()).filter(Boolean)
   const app = createMcpExpressApp(allowedHosts?.length ? { host, allowedHosts } : { host })
-  const registry = new Connectors(process.env.DATA_DIR || new URL('../data/mcp', import.meta.url).pathname)
+  const { OAuthStore, OAuthError } = await import('./oauth.ts')
+  const express = (await import('express')).default
+  const dataDir = process.env.DATA_DIR || new URL('../data/mcp', import.meta.url).pathname
+  const registry = new Connectors(dataDir)
   await registry.load()
+  const oauth = new OAuthStore(dataDir)
+  await oauth.load()
   log(`${registry.size} AI connection(s) registered`)
   const same = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y) }
   const publicBase = (req: any) => (process.env.PUBLIC_URL || `${req.headers['x-forwarded-proto'] || req.protocol}://${req.headers['x-forwarded-host'] || req.headers.host}`).replace(/\/+$/, '')
@@ -481,7 +514,7 @@ async function serveHttp() {
   const getLive = (id: string, invite: Invite, name: string) => {
     let p = live.get(id)
     if (!p) {
-      p = openWorkspace(invite, name).then((W) => ({ W, handler: toNodeHandler(createMcpHandler(createServerFor(W))) as any, used: Date.now() }))
+      p = openWorkspace(invite, name).then((W) => ({ W, handler: toNodeHandler(createMcpHandler(createServerFor(single(W)))) as any, used: Date.now() }))
       p.catch(() => live.delete(id))
       live.set(id, p)
     }
@@ -533,7 +566,7 @@ async function serveHttp() {
       return fail(res, e.status || 502, e.message || 'Could not open the workspace.')
     }
     const { id, token, info } = await registry.create(access === 'view' ? { ...cfg, sk: null } : cfg, { name: label, agent, access })
-    const handler = toNodeHandler(createMcpHandler(createServerFor(W))) as any
+    const handler = toNodeHandler(createMcpHandler(createServerFor(single(W)))) as any
     live.set(id, Promise.resolve({ W, handler, used: Date.now() }))
     log(`new AI connection ${id} (${agent}, ${access})`)
     res.status(201).json({ ...info, token, address: `${publicBase(req)}/mcp/c/${token}` })
@@ -541,11 +574,28 @@ async function serveHttp() {
 
   app.post('/mcp/agents/list', async (req: any, res: any) => {
     if (!(await verifyProof(req.body, 'list'))) return fail(res, 403, 'Only editors can see all AI connections.')
-    res.json({ connections: registry.listByPk(req.body.pk) })
+    res.json({ connections: [...registry.listByPk(req.body.pk), ...oauth.listByPk(req.body.pk)].sort((a, b) => b.createdAt - a.createdAt) })
   })
 
   app.post('/mcp/agents/revoke', async (req: any, res: any) => {
     const { token, id } = req.body || {}
+    // apps connected through sign-in (OAuth)
+    if (typeof token === 'string' && token.startsWith('og.')) {
+      const gid = await oauth.revokeByToken(token)
+      if (!gid) return fail(res, 403, 'This connection was already removed.')
+      for (const k of [...live.keys()]) if (k.startsWith(`oauth:${gid}:`)) await closeLive(k)
+      grants.delete(gid)
+      log(`revoked approval ${gid}`)
+      return res.json({ revoked: gid })
+    }
+    if (typeof id === 'string' && id.includes(':')) {
+      if (oauth.pkOf(id) !== req.body?.pk || !(await verifyProof(req.body, 'revoke', id))) return fail(res, 403, 'Only editors of this workspace can disconnect it.')
+      await oauth.revokeEntry(id)
+      await closeLive('oauth:' + id)
+      grants.delete(id.split(':')[0])
+      log(`revoked approval entry ${id}`)
+      return res.json({ revoked: id })
+    }
     let target: string | null = null
     if (typeof token === 'string') target = registry.unlock(token)?.id ?? null // the person who created it
     else if (typeof id === 'string' && registry.pkOf(id) === req.body?.pk && (await verifyProof(req.body, 'revoke', id))) target = id // any editor
@@ -569,23 +619,107 @@ async function serveHttp() {
     }
   })
 
-  // optional single-workspace endpoint (configured with PEERPAD_INVITE + MCP_TOKEN in .env)
+  /* ---------- sign-in for AI apps (OAuth 2.1, used by Claude, Codex and other MCP clients) ---------- */
+  app.use('/mcp/oauth', express.urlencoded({ extended: false }), (req: any, res: any, next: () => void) => {
+    res.set({ 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, authorization', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'cache-control': 'no-store' })
+    if (req.method === 'OPTIONS') return res.status(204).end()
+    next()
+  })
+  const oauthFail = (res: any, e: any) => {
+    if (e instanceof OAuthError) return res.status(e.status).json({ error: e.code, error_description: e.message })
+    log('oauth error:', e?.message)
+    res.status(500).json({ error: 'server_error', error_description: 'Something went wrong. Try again.' })
+  }
+  app.post('/mcp/oauth/register', async (req: any, res: any) => {
+    if (limited('reg:' + req.ip, 30)) return res.status(429).json({ error: 'slow_down', error_description: 'Too many registrations.' })
+    try { res.status(201).json(await oauth.register(req.body)) } catch (e) { oauthFail(res, e) }
+  })
+  // the approval page asks which app is connecting
+  app.get('/mcp/oauth/client', (req: any, res: any) => {
+    try { res.json(oauth.client(String(req.query.client_id || ''), String(req.query.redirect_uri || ''))) } catch (e) { oauthFail(res, e) }
+  })
+  // the approval page sends the chosen workspaces (their links stay encrypted at rest, see oauth.ts)
+  app.post('/mcp/oauth/approve', async (req: any, res: any) => {
+    if (limited(req.ip)) return res.status(429).json({ error: 'slow_down', error_description: 'Too many approvals from this network. Try again in an hour.' })
+    const b = req.body || {}
+    if (b.resource && b.resource !== `${publicBase(req)}/mcp`) return res.status(400).json({ error: 'invalid_target', error_description: 'This approval is for another server.' })
+    const chosen: { invite: Invite; access: 'edit' | 'view'; label: string; pk: string | null }[] = []
+    for (const w of Array.isArray(b.workspaces) ? b.workspaces.slice(0, 20) : []) {
+      let cfg: Invite
+      try { cfg = parseInvite(w.invite) } catch (e) { return res.status(400).json({ error: 'invalid_request', error_description: (e as Error).message }) }
+      const access = w.access === 'edit' ? 'edit' : 'view'
+      if (access === 'edit' && !cfg.sk) return res.status(403).json({ error: 'access_denied', error_description: `You can only view "${w.label}", so the app can only get view access to it.` })
+      // make sure the workspace exists here and the access is real
+      const W = await openWorkspace(access === 'view' ? { ...cfg, sk: null } : cfg, 'checking').catch(() => null)
+      try {
+        await W?.ready()
+        if (!W || (!W.pages.size && !W.meta.size)) return res.status(404).json({ error: 'invalid_request', error_description: `"${w.label}" was not found on this server.` })
+        if (access === 'edit' && W.readOnly()) return res.status(403).json({ error: 'access_denied', error_description: `You can only view "${w.label}".` })
+        chosen.push({ invite: cfg, access, label: String(w.label || (W.meta.get('name') as string) || 'Workspace'), pk: cfg.pk })
+      } catch (e) {
+        return res.status(502).json({ error: 'server_error', error_description: (e as Error).message })
+      } finally { W?.close() }
+    }
+    try {
+      res.json(await oauth.approve({ clientId: String(b.client_id || ''), redirectUri: String(b.redirect_uri || ''), challenge: String(b.code_challenge || ''), method: String(b.code_challenge_method || ''), resource: b.resource || null, workspaces: chosen }))
+    } catch (e) { oauthFail(res, e) }
+  })
+  app.post('/mcp/oauth/token', async (req: any, res: any) => {
+    try { res.json(await oauth.token(req.body)) } catch (e) { oauthFail(res, e) }
+  })
+
+  /* ---------- https://<server>/mcp : the one address AI apps connect to ---------- */
+  type GrantLive = { key: string; handler: (req: any, res: any, body: unknown) => Promise<void> }
+  const grants = new Map<string, GrantLive>()
+  function grantHandler(u: NonNullable<ReturnType<typeof oauth.unlock>>): GrantLive {
+    const key = u.workspaces.map((w) => w.entryId).join(',')
+    const cached = grants.get(u.grantId)
+    if (cached && cached.key === key) return cached
+    const names = new Map<string, string>()
+    const resolver: Resolver = {
+      list: () => u.workspaces.map((w) => ({ id: w.entryId, name: names.get(w.entryId) || w.label, access: w.access })),
+      async get(id?: string) {
+        let w = u.workspaces.length === 1 && !id ? u.workspaces[0] : undefined
+        if (!w && id) {
+          const q = id.trim().toLowerCase()
+          w = u.workspaces.find((x) => x.entryId === id) || u.workspaces.find((x) => (names.get(x.entryId) || x.label).toLowerCase() === q)
+        }
+        if (!w) throw new Error(`Choose a workspace: ${resolver.list().map((x) => `"${x.name}" (${x.id})`).join(', ')}. Pass it as the workspace argument; peerpad_list_workspaces lists them.`)
+        const l = await getLive(`oauth:${u.grantId}:${w.entryId}`, w.invite, u.clientName)
+        l.used = Date.now()
+        const nm = l.W.meta.get('name') as string | undefined
+        if (nm) names.set(w.entryId, nm)
+        return l.W
+      },
+    }
+    const g = { key, handler: toNodeHandler(createMcpHandler(createServerFor(resolver))) as any }
+    grants.set(u.grantId, g)
+    return g
+  }
+  // optional single-workspace endpoint from earlier setups (PEERPAD_INVITE + MCP_TOKEN in .env)
+  let legacy: { token: string; handler: (req: any, res: any, body: unknown) => Promise<void> } | null = null
   if (process.env.PEERPAD_INVITE) {
     const token = process.env.MCP_TOKEN
     if (!token || token.length < 24) { log('PEERPAD_INVITE is set: also set MCP_TOKEN to a random secret of at least 24 characters (openssl rand -hex 24).'); process.exit(1) }
     const W = await openWorkspace(parseInvite(process.env.PEERPAD_INVITE), process.env.PEERPAD_AI_NAME || 'AI assistant')
-    const handler = toNodeHandler(createMcpHandler(createServerFor(W))) as any
-    const auth = (req: any, res: any, next: () => void) => {
-      const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-      if (same(bearer, token) || same(String(req.params.token || ''), token)) return next()
-      fail(res, 401, 'Missing or wrong MCP token.')
-    }
-    app.all('/mcp', auth, (req: any, res: any) => void handler(req, res, req.body))
-    app.all('/mcp/:token', auth, (req: any, res: any) => void handler(req, res, req.body))
-    log('single-workspace endpoint enabled at /mcp')
-  } else {
-    app.all('/mcp', (_req: any, res: any) => fail(res, 401, 'Use the address of an AI connection (PeerPad → AI agents).'))
+    legacy = { token, handler: toNodeHandler(createMcpHandler(createServerFor(single(W)))) as any }
+    app.all('/mcp/:token', (req: any, res: any) => {
+      if (!same(String(req.params.token), token)) return fail(res, 401, 'Missing or wrong MCP token.')
+      void legacy!.handler(req, res, req.body)
+    })
+    log('single-workspace endpoint enabled at /mcp/<MCP_TOKEN>')
   }
+  app.all('/mcp', async (req: any, res: any) => {
+    const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+    if (legacy && bearer && same(bearer, legacy.token)) return void legacy.handler(req, res, req.body)
+    const u = bearer ? oauth.unlock(bearer) : null
+    if (!u) {
+      // tells the AI app where to sign in (OAuth discovery)
+      res.set('WWW-Authenticate', `Bearer resource_metadata="${publicBase(req)}/.well-known/oauth-protected-resource/mcp"${bearer ? ', error="invalid_token"' : ''}`)
+      return res.status(401).json({ error: 'invalid_token', error_description: 'Sign in to connect this app to PeerPad.' })
+    }
+    try { await grantHandler(u).handler(req, res, req.body) } catch (e) { if (!res.headersSent) fail(res, 502, (e as Error).message) }
+  })
 
   app.listen(port, host, () => log(`listening on http://${host}:${port}`))
 }

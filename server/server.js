@@ -197,6 +197,26 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size, protocol: 2 }))
   }
+  // OAuth discovery for AI apps (MCP authorization): where to register, approve and get tokens
+  const wk = url.pathname.match(/^\/\.well-known\/(oauth-protected-resource|oauth-authorization-server|openid-configuration)(\/mcp)?$/)
+  if (wk && (req.method === 'GET' || req.method === 'OPTIONS')) {
+    const base = (process.env.PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host}`).replace(/\/+$/, '')
+    const body = wk[1] === 'oauth-protected-resource'
+      ? { resource: `${base}/mcp`, resource_name: 'PeerPad', authorization_servers: [base], scopes_supported: ['peerpad'], bearer_methods_supported: ['header'] }
+      : {
+          issuer: base,
+          authorization_endpoint: `${base}/oauth/authorize`,
+          token_endpoint: `${base}/mcp/oauth/token`,
+          registration_endpoint: `${base}/mcp/oauth/register`,
+          response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none'],
+          scopes_supported: ['peerpad'],
+        }
+    res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-cache' })
+    return res.end(req.method === 'OPTIONS' ? undefined : JSON.stringify(body))
+  }
   if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
     // AI agents live in a separate service; reaching this server means the reverse proxy isn't routing /mcp to it
     res.writeHead(503, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
@@ -222,6 +242,10 @@ const server = createServer(async (req, res) => {
       'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
       'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
       'x-content-type-options': 'nosniff',
+      // the app (and its AI approval page) must never be shown inside another site's frame
+      'x-frame-options': 'DENY',
+      'content-security-policy': "frame-ancestors 'none'",
+      'referrer-policy': 'no-referrer',
     })
     return res.end(req.method === 'HEAD' ? undefined : await readFile(file))
   }

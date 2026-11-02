@@ -55,7 +55,7 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
 
   useEffect(() => {
     if (!open) return
-    setView(mine.length || canManageAll ? 'list' : 'create'); setError(''); setCreated(null)
+    setView('list'); setError(''); setCreated(null)
     if (!base) { setStatus('no-server'); return }
     setStatus('checking')
     api('/status').then((j) => { if (j?.enabled !== true) throw new Error(); setStatus('enabled'); refreshAll() }).catch(() => setStatus('disabled'))
@@ -100,7 +100,9 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
         <AnimatePresence mode="wait" initial={false}>
           {view === 'list' && (
             <motion.div key="list" initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }} className="flex flex-col gap-3">
-              <p className="text-muted">Let Claude or Codex read and edit this workspace. Each connection gets its own address and can be disconnected at any time.</p>
+              <p className="text-muted">Let Claude or Codex read and edit this workspace. Add PeerPad once in your AI app; it opens PeerPad in your browser so you can approve it.</p>
+              <OneStep address={`${base}/mcp`} />
+              <div className="mt-1 text-[11px] font-semibold uppercase tracking-wider text-faint">Connected</div>
               {rows.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line py-8 text-center">
                   <Bot size={22} className="text-faint" />
@@ -115,7 +117,7 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
                         <div className="truncate font-medium">{c.name}{c.own && <span className="ml-1.5 text-xs font-normal text-faint">yours</span>}</div>
                         <div className="text-xs text-muted">{c.access === 'edit' ? 'Can edit' : 'Can view'} · added {when(c.createdAt)} · last used {when(c.lastUsedAt)}</div>
                       </div>
-                      {c.own && (
+                      {c.own && mine.find((m) => m.id === c.id)?.address && (
                         <Button size="icon" variant="ghost" title="Copy address" aria-label="Copy address" onClick={() => copyText(mine.find((m) => m.id === c.id)!.address, toast)}><Copy size={15} /></Button>
                       )}
                       {(c.own || canManageAll) && (
@@ -125,14 +127,16 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
                   ))}
                 </ul>
               )}
-              <div className="flex justify-end"><Button variant="primary" onClick={() => setView('create')}><Plus size={15} /> Connect an AI agent</Button></div>
+              <button onClick={() => setView('create')} className="flex w-fit items-center gap-1 self-end text-xs text-muted underline decoration-line underline-offset-4 hover:text-fg">
+                <Plus size={12} /> App without sign-in support? Create a personal address
+              </button>
             </motion.div>
           )}
 
           {view === 'create' && (
             <motion.div key="create" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} className="flex flex-col gap-4">
               {(mine.length > 0 || canManageAll) && (
-                <button onClick={() => setView('list')} className="-mt-1 flex w-fit items-center gap-1 text-xs text-muted hover:text-fg"><ArrowLeft size={13} /> Connected agents</button>
+                <button onClick={() => setView('list')} className="-mt-1 flex w-fit items-center gap-1 text-xs text-muted hover:text-fg"><ArrowLeft size={13} /> Back</button>
               )}
               <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="AI agent">
                 {AGENTS.map((a) => (
@@ -190,6 +194,43 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
         </AnimatePresence>
       )}
     </Modal>
+  )
+}
+
+/** The recommended setup: one address, and the AI app handles sign-in (OAuth) by opening PeerPad's approval page. */
+function OneStep({ address }: { address: string }) {
+  const toast = useToast()
+  const [tab, setTab] = useState(0)
+  const tabs: { label: string; steps: string[]; code?: string }[] = [
+    { label: 'Claude', steps: ['In Claude, open Settings → Connectors → Add custom connector.', 'Name it PeerPad and paste the address above, then click Add.', 'Click Connect: PeerPad opens so you can choose workspaces and approve.'] },
+    { label: 'Claude Code', steps: ['Run this, then type /mcp in Claude Code and choose PeerPad → Authenticate:'], code: `claude mcp add --transport http peerpad ${address}` },
+    { label: 'Codex', steps: ['Run these in a terminal; the second opens PeerPad to approve:'], code: `codex mcp add peerpad --url ${address}\ncodex mcp login peerpad` },
+  ]
+  const t = tabs[tab]
+  return (
+    <div className="rounded-xl border border-line">
+      <div className="flex gap-2 border-b border-line p-3">
+        <Field readOnly value={address} onFocus={(e) => e.currentTarget.select()} aria-label="PeerPad address for AI apps" className="font-mono text-xs" />
+        <Button variant="primary" onClick={() => copyText(address, toast)}><Copy size={14} /> Copy</Button>
+      </div>
+      <div className="flex gap-1 border-b border-line p-1">
+        {tabs.map((x, i) => (
+          <button key={x.label} onClick={() => setTab(i)} className={cn('relative rounded-md px-3 py-1.5 text-xs font-medium transition', tab === i ? 'text-fg' : 'text-muted hover:text-fg')}>
+            {tab === i && <motion.span layoutId="onestep-tab" className="absolute inset-0 rounded-md bg-hover" />}
+            <span className="relative">{x.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-col gap-2 p-3 text-sm">
+        <ol className="flex list-decimal flex-col gap-1 pl-5 text-muted">{t.steps.map((st) => <li key={st}>{st}</li>)}</ol>
+        {t.code && (
+          <div className="relative">
+            <pre className="overflow-x-auto rounded-lg bg-fg p-3 pr-10 font-mono text-[12px] leading-relaxed text-bg">{t.code}</pre>
+            <button onClick={() => copyText(t.code!, toast)} aria-label="Copy command" className="absolute right-2 top-2 rounded-md p-1.5 text-bg/60 transition hover:bg-bg/10 hover:text-bg"><Copy size={13} /></button>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 

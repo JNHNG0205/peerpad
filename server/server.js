@@ -197,6 +197,11 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size, protocol: 2 }))
   }
+  if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
+    // AI agents live in a separate service; reaching this server means the reverse proxy isn't routing /mcp to it
+    res.writeHead(503, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
+    return res.end(JSON.stringify({ error: 'The AI agents service is not reachable: requests to /mcp arrive at the PeerPad server instead. Restart the reverse proxy (docker compose up -d --force-recreate caddy) or set MCP_UPSTREAM.' }))
+  }
   if (req.method === 'GET' || req.method === 'HEAD') {
     // static web app; anything unknown falls back to the app's index.html
     let rel = decodeURIComponent(url.pathname)

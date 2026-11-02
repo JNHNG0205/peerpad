@@ -68,9 +68,9 @@ GitHub builds the PeerPad image on every push (`.github/workflows/docker.yml`) a
 
 **Updating:** push to `main`, wait for the **Build image** run to finish (repository → Actions, a few minutes), then on the server:
 ```bash
-cd ~/peerpad && git pull && docker compose pull && docker compose up -d
+cd ~/peerpad && git pull && docker compose pull && docker compose up -d && docker compose up -d --force-recreate caddy
 ```
-`git pull` only matters when `docker-compose.yml` or `Caddyfile` changed; the app itself comes from the image. A failed build never reaches the server: it keeps running the last good image.
+`git pull` only matters when `docker-compose.yml` or `Caddyfile` changed; the app itself comes from the image. Caddy only reads `Caddyfile` when it starts, hence the last command (a one-second restart). A failed build never reaches the server: it keeps running the last good image.
 
 **Data:** workspaces live in the `peerpad_peerpad-data` Docker volume (`peerpad.db`, a SQLite database, plus encrypted files), AI connections in `peerpad_mcp-data`. Never run `docker compose down -v` unless you want to delete them. Workspaces saved by earlier versions are imported into the database automatically the first time they are opened.
 
@@ -112,7 +112,7 @@ Then ask, for example: *"List my PeerPad pages"*, *"Add today's meeting notes to
 **Privacy:** each connection address contains a secret. The server stores the connection's workspace link encrypted with that secret and keeps only a hash of it, so its files on disk reveal nothing. While an agent is working, the server decrypts that workspace to answer it; when the agent is idle, the server cannot read it. Treat connection addresses like passwords.
 
 ### For whoever runs the server
-AI agents are on by default in the Docker setup (the `mcp` service). Connections are stored in the `peerpad_mcp-data` volume. Health check: `curl -s https://notes.example.com/mcp/agents/status` should print `{"enabled":true}`.
+AI agents are on by default in the Docker setup (the `mcp` service). Connections are stored in the `peerpad_mcp-data` volume. Health check: `curl -s https://notes.example.com/mcp/agents/status` should print `{"enabled":true}`. If it prints an error saying requests arrive at the PeerPad server, Caddy is running an old config: `docker compose up -d --force-recreate caddy`.
 
 Running without Docker: start the AI service with `TRANSPORT=http PORT=3333 DATA_DIR=./data/mcp PEERPAD_SYNC_URL=http://127.0.0.1:8787 node mcp/peerpad-mcp.ts` and the server with `MCP_UPSTREAM=http://127.0.0.1:3333 npm start`, which forwards `/mcp` to it.
 

@@ -43,7 +43,8 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
   }, [s])
   const api = useCallback(async (path: string, body?: unknown) => {
     const r = await fetch(base + '/mcp/agents' + path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {})
-    const json = await r.json().catch(() => ({}))
+    const json = await r.json().catch(() => null)
+    if (!json) throw new Error('The AI agents service is not reachable on this server (requests to /mcp do not reach it).')
     if (!r.ok) throw new Error(json.error || `Request failed (${r.status})`)
     return json
   }, [base])
@@ -57,7 +58,7 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
     setView(mine.length || canManageAll ? 'list' : 'create'); setError(''); setCreated(null)
     if (!base) { setStatus('no-server'); return }
     setStatus('checking')
-    api('/status').then(() => { setStatus('enabled'); refreshAll() }).catch(() => setStatus('disabled'))
+    api('/status').then((j) => { if (j?.enabled !== true) throw new Error(); setStatus('enabled'); refreshAll() }).catch(() => setStatus('disabled'))
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setName(`${w.me.name.split(' ')[0]}'s ${agentLabel(agent)}`) }, [agent, w.me.name])
 
@@ -90,8 +91,8 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
       {status === 'no-server' && <Notice>AI agents need a PeerPad server. Open this workspace from your server's address, or set one in workspace menu → Server.</Notice>}
       {status === 'disabled' && (
         <Notice>
-          AI connections aren't turned on for this server yet. Whoever runs it can enable them with{' '}
-          <code className="rounded bg-hover px-1 font-mono text-xs">docker compose up -d --build</code> (see the README, "AI access").
+          AI agents aren't reachable on this server. Whoever runs it should check that the AI service is running and that requests to <code className="rounded bg-hover px-1 font-mono text-xs">/mcp</code> reach it. With the Docker setup, run{' '}
+          <code className="rounded bg-hover px-1 font-mono text-xs">docker compose up -d --force-recreate caddy</code> after updating.
         </Notice>
       )}
       {status === 'checking' && <div className="h-24 animate-pulse rounded-xl bg-hover" />}

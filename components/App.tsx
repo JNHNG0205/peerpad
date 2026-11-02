@@ -88,7 +88,7 @@ function Shell({ s }: { s: Session }) {
       s.meta.set('name', me.name.split(' ')[0] + "'s workspace")
       id = addPage(s.pages, { title: 'Welcome to PeerPad', icon: '👋' })
     }, 'local')
-    writeMarkdown(s.doc, id, WELCOME).then(() => setPageId(id))
+    writeMarkdown(s, id, WELCOME).then(() => setPageId(id))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // keep the address bar, recent list and presence in sync with the open page
@@ -115,7 +115,7 @@ function Shell({ s }: { s: Session }) {
     ;(document.activeElement as HTMLElement | null)?.blur?.() // keystrokes go to the new title, not the button
     let id = ''
     s.doc.transact(() => { id = addPage(s.pages, { parent, title: opts.title || '', icon: opts.icon || '' }) }, 'local')
-    if (opts.markdown) writeMarkdown(s.doc, id, opts.markdown)
+    if (opts.markdown) writeMarkdown(s, id, opts.markdown)
     openPage(id)
     return id
   }, [s, readOnly, openPage])
@@ -127,6 +127,7 @@ function Shell({ s }: { s: Session }) {
       action: 'Delete',
       onConfirm: () => {
         s.doc.transact(() => removePages(s.doc, all), 'local')
+        s.net.dropPages(all)
         if (pageId && all.includes(pageId)) setPageId(null)
         toast('Page deleted')
       },
@@ -142,7 +143,7 @@ function Shell({ s }: { s: Session }) {
         const m = text.match(/^\s*#\s+(.+)\n?/)
         let id = ''
         s.doc.transact(() => { id = addPage(s.pages, { parent, title: m ? m[1].trim() : f.name.replace(/\.(md|markdown|txt)$/i, '') }) }, 'local')
-        await writeMarkdown(s.doc, id, m ? text.slice(m[0].length) : text)
+        await writeMarkdown(s, id, m ? text.slice(m[0].length) : text)
         last = id
       }
       if (last) { openPage(last); toast((inp.files?.length || 0) > 1 ? `Imported ${inp.files?.length} pages` : 'Page imported') }
@@ -150,7 +151,7 @@ function Shell({ s }: { s: Session }) {
     inp.click()
   }, [s, openPage, toast])
   const exportMarkdown = useCallback(async (id: string, mode: 'copy' | 'download') => {
-    const md = `# ${titleOf(s.pages, id)}\n\n` + (await pageMarkdown(s.doc, id))
+    const md = `# ${titleOf(s.pages, id)}\n\n` + (await pageMarkdown(s, id))
     if (mode === 'copy') {
       try { await navigator.clipboard.writeText(md); toast('Copied as Markdown') } catch { toast('Copy failed') }
     } else {

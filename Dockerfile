@@ -1,18 +1,20 @@
+# syntax=docker/dockerfile:1
 # Build the web app (Next.js static export -> out/)
 FROM node:22-alpine AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package*.json ./
-RUN npm ci
+# the npm download cache survives between builds, so reinstalls after dependency changes are fast
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY . .
 RUN npm run build
 
-# Runtime: sync server (serves out/) and the optional MCP server (TypeScript, run directly by Node)
+# Runtime: PeerPad server (serves out/) and the AI agents service (TypeScript, run directly by Node)
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production DATA_DIR=/data PORT=8787 NODE_NO_WARNINGS=1
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
 COPY server ./server
 COPY lib ./lib
 COPY mcp ./mcp

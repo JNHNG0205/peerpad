@@ -4,7 +4,8 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { Search, FileText, Plus, Share2, Sun, Moon, CornerDownLeft, Sparkles } from 'lucide-react'
 import { useWorkspace } from './workspace'
-import { titleOf, iconOf, ancestorsOf, fragmentOf } from '@/lib/pages.ts'
+import { titleOf, iconOf, ancestorsOf } from '@/lib/pages.ts'
+import { pageTextLocal } from './convert'
 import { cn } from './ui'
 
 type Item = { id: string; label: string; sub?: string; icon: React.ReactNode; run: () => void; snippet?: string }
@@ -18,6 +19,19 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const input = useRef<HTMLInputElement>(null)
   useEffect(() => { if (open) { setQ(''); setActive(0); setTimeout(() => input.current?.focus(), 10) } }, [open])
 
+  // page text comes from this browser's copy of each page (pages are loaded on demand)
+  const [texts, setTexts] = useState<Map<string, string>>(new Map())
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    ;(async () => {
+      const m = new Map<string, string>()
+      for (const id of s.pages.keys()) m.set(id, await pageTextLocal(s, id))
+      if (!cancelled) setTexts(m)
+    })()
+    return () => { cancelled = true }
+  }, [open, s])
+
   const items = useMemo<Item[]>(() => {
     if (!open) return []
     const query = q.trim().toLowerCase()
@@ -28,7 +42,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       let snippet: string | undefined
       let match = !query || title.toLowerCase().includes(query)
       if (!match && query.length > 1) {
-        const text = fragmentOf(s.doc, id).toString().replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
+        const text = texts.get(id) || ''
         const at = text.toLowerCase().indexOf(query)
         if (at >= 0) { match = true; snippet = (at > 30 ? '…' : '') + text.slice(Math.max(0, at - 30), at + query.length + 50) }
       }
@@ -42,7 +56,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'theme', label: w.theme.resolved === 'dark' ? 'Switch to light theme' : 'Switch to dark theme', icon: w.theme.resolved === 'dark' ? <Sun size={15} /> : <Moon size={15} />, run: () => w.theme.setChoice(w.theme.resolved === 'dark' ? 'light' : 'dark') },
     ].filter((a) => !query || a.label.toLowerCase().includes(query) || a.id === 'new')
     return [...pages.slice(0, 30), ...actions]
-  }, [open, q, s, w])
+  }, [open, q, s, w, texts])
 
   const pick = (it?: Item) => { if (!it) return; onClose(); it.run() }
   return createPortal(

@@ -1,12 +1,27 @@
 // Workspace structure, shared by the web app and the MCP server.
-//   doc.getMap('meta')  name of the workspace
-//   doc.getMap('pages') pageId -> Y.Map { title: Y.Text, icon, parent, order, created }
-//   doc.getXmlFragment('page:<id>') the page's content (BlockNote document)
-// Pages from the first version kept their content in a 'blocks' Y.Array; legacyMarkdown() converts it.
+// Root document (always loaded):
+//   getMap('meta')  name of the workspace
+//   getMap('pages') pageId -> Y.Map { title: Y.Text, icon, parent, order, created, v }
+// Page document (one per page, loaded on demand):
+//   getXmlFragment('content')  the page's content (BlockNote document)
+// Older formats, converted when an editor opens the page (contentSource tells which applies):
+//   v2: content in the root document, getXmlFragment('page:<id>')
+//   v1: a 'blocks' Y.Array inside the page entry (legacyMarkdown converts it)
 import * as Y from 'yjs'
 
 export const uid = (): string => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4)
+/** v2 location of a page's content, inside the root document. */
 export const fragmentOf = (doc: Y.Doc, id: string): Y.XmlFragment => doc.getXmlFragment('page:' + id)
+/** A page document's content. */
+export const pageFragment = (pageDoc: Y.Doc): Y.XmlFragment => pageDoc.getXmlFragment('content')
+export const PAGE_VERSION = 3
+/** Where a page's content currently lives. */
+export function contentSource(root: Y.Doc, page: Y.Map<any> | undefined, id: string): 'page' | 'root' | 'legacy' {
+  if (!page || page.get('v') === PAGE_VERSION) return 'page'
+  if (fragmentOf(root, id).length) return 'root'
+  if ((page.get('blocks')?.length || 0) > 0) return 'legacy'
+  return 'page'
+}
 
 export function pagesOf(doc: Y.Doc): Y.Map<Y.Map<any>> {
   return doc.getMap('pages') as Y.Map<Y.Map<any>>
@@ -43,11 +58,12 @@ export function addPage(pages: Y.Map<Y.Map<any>>, { id = uid(), parent = null, t
   p.set('parent', parent)
   p.set('order', Date.now())
   p.set('created', Date.now())
-  p.set('v', 2)
+  p.set('v', PAGE_VERSION)
   pages.set(id, p)
   return id
 }
-/** Deletes pages and empties their content. Call inside a transaction. */
+/** Removes pages from the page list (and any older-format content in the root). Call inside a transaction;
+ * the pages' own documents are deleted separately (net.dropPages / dropDoc). */
 export function removePages(doc: Y.Doc, ids: string[]) {
   const pages = pagesOf(doc)
   for (const id of ids) {
@@ -70,8 +86,6 @@ export function applyTitle(ytext: Y.Text, next: string) {
 }
 
 /* ---------------- first-version pages ---------------- */
-export const isLegacy = (doc: Y.Doc, page: Y.Map<any> | undefined, id: string): boolean =>
-  !!page && (page.get('blocks')?.length || 0) > 0 && fragmentOf(doc, id).length === 0
 
 function b64(u8: Uint8Array): string {
   let s = ''

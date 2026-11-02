@@ -90,66 +90,91 @@ export async function loadSigner(pk?: string | null, sk?: string | null): Promis
 }
 
 /* ---------- transport ---------- */
+// One encrypted WebSocket per workspace, carrying several documents: "root" (page list) and one per
+// open page. Each document is subscribed separately, so a browser only downloads and receives the pages
+// it has open.
 export type TransportHooks = {
   emit?: () => void
-  onReady?: () => void
   /** awareness update (presence + cursors) from another client */
   onAwareness?: (tab: string, update: Uint8Array) => void
   onLeave?: (tab: string) => void
+  onConnect?: () => void
   onDisconnect?: () => void
   onSigner?: (signer: Signer) => void
+  /** a page's history was deleted (the page was deleted) */
+  onDropped?: (d: string) => void
 }
 export type TransportState = { status: 'connecting' | 'connected' | 'offline' | 'error' | 'closed'; error: string | null; everReady: boolean; readOnly: boolean }
-export type Transport = ReturnType<typeof serverTransport>
+export type Connection = ReturnType<typeof serverConnection>
+export type DocChannel = {
+  /** resolves once the server's copy has been merged in */
+  whenReady(timeoutMs?: number): Promise<void>
+  /** resolves when the server has stored the update */
+  sendUpdate(u: Uint8Array): Promise<void>
+  readonly ready: boolean
+  close(): void
+}
+/** A document's history is compacted once it has this many rows on the server. */
+export const COMPACT_AT = 150
 
-/**
- * Connects a Y.Doc to a sync server. The server stores and relays encrypted updates only.
- * tabId identifies this client for presence; use String(doc.clientID) to match awareness.
- */
-export function serverTransport(doc: Y.Doc, ws: string, key: string, url: string, tabId: string, hooks: TransportHooks = {}, signerIn: Signer | null = null) {
-  const h = { emit() {}, onReady() {}, onAwareness() {}, onLeave() {}, onDisconnect() {}, onSigner() {}, ...hooks } as Required<TransportHooks>
+export function serverConnection(ws: string, key: string, url: string, tabId: string, hooks: TransportHooks = {}, signerIn: Signer | null = null) {
+  const h = { emit() {}, onAwareness() {}, onLeave() {}, onConnect() {}, onDisconnect() {}, onSigner() {}, onDropped() {}, ...hooks } as Required<TransportHooks>
   let signer = signerIn
   const st: TransportState = { status: 'connecting', error: null, everReady: false, readOnly: !!signer && !signer.canWrite }
   const signData = async (data: string) => (signer?.canWrite ? b64u(await signer.sign(te.encode(data))) : undefined)
   let sock: WebSocket | null = null
   let k: CryptoKey | null = null
   let room: string | null = null
-  let ready = false, retry = 1000, lastSeq = 0, closed = false
-  let acks: { resolve: () => void; reject: (e: Error) => void }[] = [] // acks arrive in send order
-  let readyWaiters: (() => void)[] = []
-  const sendJSON = (o: unknown) => { if (sock?.readyState === 1) sock.send(JSON.stringify(o)) }
+  let open_ = false, retry = 1000, closed = false, pubKnown = false
   // Encryption is async; this chain keeps sends in the same order as the edits.
   let chain: Promise<unknown> = Promise.resolve()
   const enqueue = (fn: () => Promise<unknown> | unknown) => (chain = chain.then(fn, fn))
+  const sendJSON = (o: unknown) => { if (sock?.readyState === 1) sock.send(JSON.stringify(o)) }
+
+  type Ch = {
+    d: string; doc: Y.Doc; ready: boolean; lastSeq: number; n: number
+    acks: { resolve: () => void; reject: (e: Error) => void }[]
+    waiters: (() => void)[]; compactTimer: ReturnType<typeof setTimeout> | null
+  }
+  const channels = new Map<string, Ch>()
 
   async function start() {
     try {
       if (!globalThis.crypto?.subtle) throw new Error('Encryption needs HTTPS (or localhost).')
       k = await deriveKey(key, ws)
       room = await roomHash(ws, key)
-      open()
+      connect()
     } catch (e) {
       st.status = 'error'; st.error = (e as Error).message; h.emit()
     }
   }
-  function open() {
+  function connect() {
     if (closed) return
     try {
       const u = new URL(url)
       u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
       u.pathname = u.pathname.replace(/\/+$/, '') + '/sync'
-      u.search = '?room=' + room
+      u.search = `?room=${room}&v=2`
       sock = new WebSocket(u)
     } catch {
-      st.status = 'error'; st.error = 'Invalid sync server address.'; h.emit(); return
+      st.status = 'error'; st.error = 'Invalid server address.'; h.emit(); return
     }
     st.status = 'connecting'; h.emit()
-    sock.onopen = () => { retry = 1000 }
+    sock.onopen = () => {
+      retry = 1000
+      open_ = true
+      st.status = 'connected'; st.error = null; st.everReady = true
+      for (const c of channels.values()) sendJSON({ t: 'sub', d: c.d })
+      h.onConnect()
+      h.emit()
+    }
     sock.onmessage = async (ev) => {
       let m: any
       try { m = JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)) } catch { return }
       const kk = k as CryptoKey
-      if (m.t === 'init') {
+      const c = m.d !== undefined ? channels.get(m.d) : undefined
+      if (m.t === 'init' && c) {
+        if (!(await checkPub(m.pub))) return
         const shadow = new Y.Doc() // what the server already has
         const updates: Uint8Array[] = []
         for (const e of m.entries) {
@@ -158,80 +183,102 @@ export function serverTransport(doc: Y.Doc, ws: string, key: string, url: string
         if (m.entries.length && !updates.length) {
           st.status = 'error'; st.error = 'Could not decrypt this workspace. Check the invite link.'; h.emit(); return
         }
-        lastSeq = m.seq
-        if (m.pub && signer && m.pub !== signer.pk) {
-          st.status = 'error'; st.error = 'This link does not match the workspace. Ask for a new invite link.'; h.emit(); return
-        }
-        if (m.pub && !signer) {
-          // an old link opening an upgraded workspace: it can still read, but no longer edit
-          signer = await loadSigner(m.pub)
-          if (signer) h.onSigner(signer)
-        }
-        if (signer && !m.pub && signer.canWrite) sendJSON({ t: 'claim', pub: signer.pk })
-        st.readOnly = !!signer && !signer.canWrite
-        doc.transact(() => {
-          for (const u of updates) { Y.applyUpdate(shadow, u); Y.applyUpdate(doc, u, 'srv') }
+        c.lastSeq = m.seq
+        c.n = m.n ?? m.entries.length
+        c.doc.transact(() => {
+          for (const u of updates) { Y.applyUpdate(shadow, u); Y.applyUpdate(c.doc, u, 'srv') }
         }, 'srv')
-        // upload whatever the server is missing (offline edits, or a brand-new workspace)
-        const missing = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(shadow))
-        ready = true
-        st.status = 'connected'; st.error = null; st.everReady = true
-        if (missing.length > 2 && !st.readOnly) sendUpdate(missing).catch(() => {})
-        // keep the server log small: replace history with one encrypted snapshot
-        if (m.entries.length > 50 && !st.readOnly) enqueue(async () => {
-          const data = await seal(kk, Y.encodeStateAsUpdate(doc))
-          sendJSON({ t: 'compact', upTo: lastSeq, data, sig: await signData(data) })
-        })
-        readyWaiters.forEach((f) => f()); readyWaiters = []
-        h.onReady()
+        // upload whatever the server is missing (offline edits, or a new document)
+        const missing = Y.encodeStateAsUpdate(c.doc, Y.encodeStateVector(shadow))
+        c.ready = true
+        if (missing.length > 2 && !st.readOnly) sendUpdate(c, missing).catch(() => {})
+        maybeCompact(c)
+        c.waiters.forEach((f) => f()); c.waiters = []
         h.emit()
-      } else if (m.t === 'up') {
-        lastSeq = Math.max(lastSeq, m.seq)
-        try { Y.applyUpdate(doc, await unseal(kk, m.data), 'srv') } catch {}
-      } else if (m.t === 'ack') {
-        lastSeq = Math.max(lastSeq, m.seq)
-        acks.shift()?.resolve()
+      } else if (m.t === 'up' && c) {
+        c.lastSeq = Math.max(c.lastSeq, m.seq)
+        c.n++
+        try { Y.applyUpdate(c.doc, await unseal(kk, m.data), 'srv') } catch {}
+        maybeCompact(c)
+      } else if (m.t === 'ack' && c) {
+        c.lastSeq = Math.max(c.lastSeq, m.seq)
+        if (typeof m.n === 'number') c.n = m.n
+        c.acks.shift()?.resolve()
+        maybeCompact(c)
+      } else if (m.t === 'compacted' && c) {
+        c.n = typeof m.n === 'number' ? m.n : 0 // skipped: someone else just compacted
+      } else if (m.t === 'dropped') {
+        h.onDropped(m.d)
       } else if (m.t === 'pres') {
         try { h.onAwareness(m.tab, await unseal(kk, m.data)) } catch {}
       } else if (m.t === 'leave') {
         h.onLeave(m.tab)
       } else if (m.t === 'pub') {
-        // the workspace was just upgraded by an editor
-        if (!signer) {
-          signer = await loadSigner(m.pub)
-          if (signer) { st.readOnly = !signer.canWrite; h.onSigner(signer); h.emit() }
-        }
+        await checkPub(m.pub)
+        h.emit()
       } else if (m.t === 'error') {
-        if (m.for === 'up') acks.shift()?.reject(new Error(m.error))
+        if (m.for === 'up' && c) c.acks.shift()?.reject(new Error(m.error))
         else st.error = m.error
         h.emit()
       }
     }
     sock.onclose = () => {
-      ready = false
+      open_ = false
       st.status = closed ? 'closed' : 'offline'
       // unacked updates are re-sent by the init diff after reconnecting
-      acks.forEach((a) => a.reject(new Error('Connection to the sync server dropped.')))
-      acks = []
+      for (const c of channels.values()) {
+        c.ready = false
+        c.acks.forEach((a) => a.reject(new Error('Connection to the server dropped.')))
+        c.acks = []
+      }
       h.onDisconnect()
       h.emit()
       if (closed) return
-      setTimeout(open, retry)
+      setTimeout(connect, retry)
       retry = Math.min(retry * 2, 30000)
     }
   }
-  function sendUpdate(u: Uint8Array): Promise<void> {
+  /** Permissions: the server remembers the workspace's public key. */
+  async function checkPub(pub: string | null | undefined): Promise<boolean> {
+    if (pub && signer && pub !== signer.pk) {
+      st.status = 'error'; st.error = 'This link does not match the workspace. Ask for a new invite link.'; h.emit(); return false
+    }
+    if (pub && !signer) {
+      // an old link opening an upgraded workspace: it can still read, but no longer edit
+      signer = await loadSigner(pub)
+      if (signer) h.onSigner(signer)
+    }
+    if (signer && !pub && signer.canWrite && !pubKnown) sendJSON({ t: 'claim', pub: signer.pk })
+    pubKnown = true
+    st.readOnly = !!signer && !signer.canWrite
+    return true
+  }
+  function sendUpdate(c: Ch, u: Uint8Array): Promise<void> {
     if (st.readOnly) return Promise.reject(new Error('This link is view-only.'))
-    if (!ready) return Promise.reject(new Error('Not connected to the sync server.'))
+    if (!c.ready || !open_) return Promise.reject(new Error('Not connected to the server.'))
     return new Promise((resolve, reject) => {
       enqueue(async () => {
         const data = await seal(k as CryptoKey, u)
         const sig = await signData(data)
-        if (!ready || sock?.readyState !== 1) return reject(new Error('Not connected to the sync server.'))
-        acks.push({ resolve, reject })
-        sock.send(JSON.stringify({ t: 'up', data, sig }))
+        if (!c.ready || sock?.readyState !== 1) return reject(new Error('Not connected to the server.'))
+        c.acks.push({ resolve, reject })
+        sock.send(JSON.stringify({ t: 'up', d: c.d, data, sig }))
       })
     })
+  }
+  /** Long histories are replaced by one encrypted snapshot. Only editors can do this (the server can't read it). */
+  function maybeCompact(c: Ch) {
+    if (c.n < COMPACT_AT || c.compactTimer || st.readOnly || !c.ready) return
+    // a random delay, so several editors don't all compact at once (the server also ignores repeats)
+    c.compactTimer = setTimeout(() => {
+      c.compactTimer = null
+      if (c.n < COMPACT_AT || !c.ready || st.readOnly) return
+      const upTo = c.lastSeq
+      enqueue(async () => {
+        const data = await seal(k as CryptoKey, Y.encodeStateAsUpdate(c.doc))
+        sendJSON({ t: 'compact', d: c.d, upTo, data, sig: await signData(data) })
+      })
+    }, 1500 + Math.random() * 8000)
   }
   const assetUrl = (id: string) => {
     const u = new URL(url)
@@ -248,20 +295,39 @@ export function serverTransport(doc: Y.Doc, ws: string, key: string, url: string
   return {
     state: st,
     get signer() { return signer },
-    whenReady(timeoutMs = 15000): Promise<void> {
-      if (ready) return Promise.resolve()
-      return new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(st.error || `Could not reach the sync server at ${url}.`)), timeoutMs)
-        readyWaiters.push(() => { clearTimeout(t); resolve() })
-      })
+    /** Subscribe a Y.Doc to a server document ("root" or a page id). */
+    addDoc(d: string, doc: Y.Doc): DocChannel {
+      const c: Ch = { d, doc, ready: false, lastSeq: 0, n: 0, acks: [], waiters: [], compactTimer: null }
+      channels.set(d, c)
+      if (open_) sendJSON({ t: 'sub', d })
+      return {
+        get ready() { return c.ready },
+        whenReady(timeoutMs = 15000) {
+          if (c.ready) return Promise.resolve()
+          return new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error(st.error || `Could not reach the server at ${url}.`)), timeoutMs)
+            c.waiters.push(() => { clearTimeout(t); resolve() })
+          })
+        },
+        sendUpdate: (u) => sendUpdate(c, u),
+        close() {
+          if (c.compactTimer) clearTimeout(c.compactTimer)
+          channels.delete(d)
+          sendJSON({ t: 'unsub', d })
+        },
+      }
     },
-    sendUpdate,
+    /** Delete a page's history on the server (after the page itself was deleted). */
+    async dropDoc(d: string) {
+      if (st.readOnly || d === 'root') return
+      enqueue(async () => sendJSON({ t: 'drop', d, sig: await signData('drop:' + d) }))
+    },
     /** awareness update (presence + cursors), encrypted */
     sendAwareness(update: Uint8Array) {
-      if (ready) enqueue(async () => sendJSON({ t: 'pres', tab: tabId, data: await seal(k as CryptoKey, update) }))
+      if (open_) enqueue(async () => sendJSON({ t: 'pres', tab: tabId, data: await seal(k as CryptoKey, update) }))
     },
     close() { closed = true; sock?.close() },
-    /** Encrypt and store a file (image) on the sync server. Returns its id. */
+    /** Encrypt and store a file (image) on the server. Returns its id. */
     async uploadAsset(bytes: Uint8Array): Promise<string> {
       if (st.readOnly) throw new Error('This link is view-only.')
       if (!k) await whenKeys()
@@ -277,7 +343,7 @@ export function serverTransport(doc: Y.Doc, ws: string, key: string, url: string
     async fetchAsset(id: string): Promise<Uint8Array> {
       if (!k) await whenKeys()
       const r = await fetch(assetUrl(id))
-      if (!r.ok) throw new Error(r.status === 404 ? 'Image not found on the sync server.' : `Download failed (${r.status}).`)
+      if (!r.ok) throw new Error(r.status === 404 ? 'Image not found on the server.' : `Download failed (${r.status}).`)
       return unsealBytes(k as CryptoKey, new Uint8Array(await r.arrayBuffer()))
     },
   }

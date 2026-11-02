@@ -1,9 +1,11 @@
 # Self-host PeerPad + automatic HTTPS (Caddy gets a free Let's Encrypt certificate).
-# Usage:  echo "DOMAIN=notes.example.com" > .env && docker compose up -d --build
+# Uses the image GitHub builds on every push (see .github/workflows/docker.yml).
+#   First run:  echo "DOMAIN=notes.example.com" > .env && docker compose up -d
+#   Update:     docker compose pull && docker compose up -d
+# To build on this machine instead: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
   peerpad:
-    build: .
-    image: peerpad-app
+    image: ${PEERPAD_IMAGE:-ghcr.io/jnhng0205/peerpad:latest}
     restart: unless-stopped
     volumes:
       - peerpad-data:/data
@@ -11,8 +13,7 @@ services:
   # AI agents (MCP): lets Claude, Codex and other AI tools work in workspaces.
   # People create their own connections in the app (AI agents button).
   mcp:
-    image: peerpad-app
-    pull_policy: never
+    image: ${PEERPAD_IMAGE:-ghcr.io/jnhng0205/peerpad:latest}
     restart: unless-stopped
     command: ["node", "mcp/peerpad-mcp.ts"]
     environment:

@@ -1,15 +1,18 @@
-// PeerPad sync server.
-// - Keeps an always-on copy of each workspace so edits sync even when no teammate is online.
-// - End-to-end encrypted: browsers encrypt every update with the workspace key before sending.
-//   The server only stores and relays opaque blobs; it never sees page content, names, or keys.
-// - Also serves the built web app (Next.js static export in out/), so one deploy = app + sync.
+// PeerPad server.
+// - Stores and relays end-to-end encrypted workspace updates: browsers encrypt every update with the
+//   workspace key before sending, so the server never sees page content, names or keys.
+// - A workspace is several documents: "root" (page list, titles) and one per page, loaded on demand.
+//   Each document's history is append-only rows in SQLite; editors' browsers periodically replace old
+//   rows with one encrypted snapshot (compaction), since only they can read the content.
+// - Also serves the built web app (Next.js static export in out/) and encrypted files (images).
 //
-// Env: PORT (default 8787), DATA_DIR (default ./data), STATIC_DIR (default ../out)
+// Env: PORT (8787), DATA_DIR (./data), STATIC_DIR (../out), MCP_UPSTREAM (optional, forwards /mcp)
 import { createServer, request as httpRequest } from 'node:http'
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 import { WebSocketServer } from 'ws'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -22,9 +25,12 @@ const TYPES = {
   '.ico': 'image/x-icon', '.webp': 'image/webp', '.woff': 'font/woff', '.woff2': 'font/woff2', '.map': 'application/json',
 }
 const MAX_MSG = 10 * 1024 * 1024 // per message
-const MAX_ROOM = 100 * 1024 * 1024 // per workspace on disk
+const MAX_ROOM = 200 * 1024 * 1024 // per workspace (all documents), excluding files
 const ROOM_RE = /^[a-f0-9]{64}$/
+const DOC_RE = /^(root|[A-Za-z0-9_-]{1,40})$/
 const PUB_RE = /^[A-Za-z0-9_-]{87}$/ // raw P-256 public key, base64url
+const COMPACT_GAP_MS = 20_000 // ignore another compaction of the same document within this window
+const PRES_PER_SEC = 30 // presence messages allowed per connection per second
 
 // Workspaces with view-only links have a public key; every change must carry a valid signature.
 const te = new TextEncoder()
@@ -40,46 +46,78 @@ async function verifier(r) {
 
 await mkdir(DATA, { recursive: true })
 
-/** room -> { entries: [{seq, data}], seq, size, clients: Set, timer } */
-const rooms = new Map()
+/* ---------- storage: SQLite, append-only rows per document ---------- */
+const db = new DatabaseSync(path.join(DATA, 'peerpad.db'))
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  CREATE TABLE IF NOT EXISTS rooms (room TEXT PRIMARY KEY, pub TEXT);
+  CREATE TABLE IF NOT EXISTS updates (
+    room TEXT NOT NULL, doc TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL,
+    PRIMARY KEY (room, doc, seq)
+  ) WITHOUT ROWID;
+`)
+const q = {
+  pub: db.prepare('SELECT pub FROM rooms WHERE room = ?'),
+  setPub: db.prepare('INSERT INTO rooms (room, pub) VALUES (?, ?) ON CONFLICT(room) DO UPDATE SET pub = excluded.pub'),
+  docInfo: db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq, COUNT(*) AS n FROM updates WHERE room = ? AND doc = ?'),
+  roomSize: db.prepare('SELECT COALESCE(SUM(LENGTH(data)), 0) AS size, COUNT(*) AS n FROM updates WHERE room = ?'),
+  entries: db.prepare('SELECT seq, data FROM updates WHERE room = ? AND doc = ? ORDER BY seq'),
+  insert: db.prepare('INSERT INTO updates (room, doc, seq, data) VALUES (?, ?, ?, ?)'),
+  trim: db.prepare('DELETE FROM updates WHERE room = ? AND doc = ? AND seq <= ?'),
+  drop: db.prepare('DELETE FROM updates WHERE room = ? AND doc = ?'),
+}
+const tx = (fn) => { db.exec('BEGIN'); try { const r = fn(); db.exec('COMMIT'); return r } catch (e) { db.exec('ROLLBACK'); throw e } }
 
+/** Workspaces saved by earlier versions (one JSON file each) become the "root" document. */
+async function importLegacy(room) {
+  const file = path.join(DATA, room + '.json')
+  if (!existsSync(file)) return
+  if (q.roomSize.get(room).n > 0) return
+  try {
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    tx(() => {
+      for (const e of saved.entries || []) q.insert.run(room, 'root', e.seq, e.data)
+      if (saved.pub) q.setPub.run(room, saved.pub)
+    })
+    await rename(file, file + '.imported')
+    console.log(`imported workspace ${room.slice(0, 8)} (${(saved.entries || []).length} entries)`)
+  } catch (e) {
+    console.error('import failed', room.slice(0, 8), e.message)
+  }
+}
+
+/** room -> { pub, verifyKey, size, clients: Set<socket>, docs: Map<doc, { seq, n, lastCompact, subs: Set<socket> }> } */
+const rooms = new Map()
 async function getRoom(id) {
   let r = rooms.get(id)
-  if (r) return r
-  r = { entries: [], seq: 0, size: 0, pub: null, clients: new Set(), timer: null, loading: null }
+  if (r) return r.ready ? r : (await r.loading, r)
+  r = { pub: null, verifyKey: null, size: 0, clients: new Set(), docs: new Map(), ready: false }
   rooms.set(id, r)
   r.loading = (async () => {
-    try {
-      const saved = JSON.parse(await readFile(path.join(DATA, id + '.json'), 'utf8'))
-      r.entries = saved.entries || []
-      r.seq = saved.seq || 0
-      r.pub = saved.pub || null
-      r.size = r.entries.reduce((s, e) => s + e.data.length, 0)
-    } catch {}
+    await importLegacy(id)
+    r.pub = q.pub.get(id)?.pub || null
+    r.size = q.roomSize.get(id).size
+    r.ready = true
   })()
   await r.loading
   return r
 }
-
-function scheduleSave(id, r) {
-  clearTimeout(r.timer)
-  r.timer = setTimeout(async () => {
-    r.timer = null
-    const file = path.join(DATA, id + '.json')
-    try {
-      await writeFile(file + '.tmp', JSON.stringify({ seq: r.seq, pub: r.pub, entries: r.entries }))
-      await rename(file + '.tmp', file)
-    } catch (e) {
-      console.error('save failed', id.slice(0, 8), e.message)
-    }
-    if (!r.clients.size) rooms.delete(id)
-  }, 800)
+function docOf(r, room, d) {
+  let doc = r.docs.get(d)
+  if (!doc) {
+    const info = q.docInfo.get(room, d)
+    doc = { seq: info.seq, n: info.n, lastCompact: 0, subs: new Set() }
+    r.docs.set(d, doc)
+  }
+  return doc
 }
+const releaseRoom = (id, r) => { if (!r.clients.size) rooms.delete(id) }
 
 const send = (sock, obj) => sock.readyState === 1 && sock.send(JSON.stringify(obj))
-const broadcast = (r, from, obj) => {
+const broadcast = (set, from, obj) => {
   const s = JSON.stringify(obj)
-  for (const c of r.clients) if (c !== from && c.readyState === 1) c.send(s)
+  for (const c of set) if (c !== from && c.readyState === 1) c.send(s)
 }
 
 // ---------- HTTP: health + static app ----------
@@ -129,7 +167,7 @@ async function handleAsset(req, res, room, id) {
       await writeFile(file, body)
       return res.writeHead(201, CORS).end('Stored')
     } finally {
-      if (!r.clients.size && !r.timer) rooms.delete(room)
+      releaseRoom(room, r)
     }
   }
   res.writeHead(405, CORS).end()
@@ -157,7 +195,7 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname.endsWith('/peerpad-health')) {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
-    return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size }))
+    return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size, protocol: 2 }))
   }
   if (req.method === 'GET' || req.method === 'HEAD') {
     // static web app; anything unknown falls back to the app's index.html
@@ -186,16 +224,32 @@ const server = createServer(async (req, res) => {
 })
 
 // ---------- WebSocket sync ----------
+// Protocol (JSON messages; "d" names a document: "root" or a page id):
+//   client: sub{d} unsub{d} up{d,data,sig} compact{d,upTo,data,sig} drop{d,sig} pres{tab,data} claim{pub}
+//   server: init{d,entries,seq,n,pub} up{d,seq,data} ack{d,seq,n} compacted{d} dropped{d} pres leave pub error
+// Connections without ?v=2 (older app versions) get the root document automatically.
 const wss = new WebSocketServer({ server, path: '/sync', maxPayload: MAX_MSG })
 
 wss.on('connection', async (sock, req) => {
-  const id = new URL(req.url, 'http://x').searchParams.get('room') || ''
+  const params = new URL(req.url, 'http://x').searchParams
+  const id = params.get('room') || ''
   if (!ROOM_RE.test(id)) return sock.close(1008, 'bad room')
+  const legacyClient = params.get('v') !== '2'
   const r = await getRoom(id)
   r.clients.add(sock)
+  sock.subs = new Set()
   sock.isAlive = true
+  sock.pres = { t: 0, n: 0 }
   sock.on('pong', () => (sock.isAlive = true))
-  send(sock, { t: 'init', entries: r.entries, seq: r.seq, pub: r.pub })
+
+  const subscribe = (d) => {
+    const doc = docOf(r, id, d)
+    doc.subs.add(sock)
+    sock.subs.add(d)
+    const entries = q.entries.all(id, d).map((e) => ({ seq: e.seq, data: e.data }))
+    send(sock, { t: 'init', d, entries, seq: doc.seq, n: doc.n, pub: r.pub }) // older app versions ignore d and n
+  }
+  if (legacyClient) subscribe('root')
 
   // Signature checks are async; handle each socket's messages strictly in order so acks match.
   let queue = Promise.resolve()
@@ -204,28 +258,53 @@ wss.on('connection', async (sock, req) => {
   async function handle(raw) {
     let m
     try { m = JSON.parse(raw) } catch { return }
+    const d = m.d === undefined ? 'root' : m.d
+    if (!DOC_RE.test(String(d))) return send(sock, { t: 'error', d, error: 'Bad document id.' })
     if ((m.t === 'up' || m.t === 'compact') && r.pub) {
       const verify = await verifier(r)
-      if (!(await verify(m.data, m.sig))) return send(sock, { t: 'error', for: m.t, error: 'This link is view-only. Ask for an edit link to make changes.' })
+      if (!(await verify(m.data, m.sig))) return send(sock, { t: 'error', for: m.t, d, error: 'This link is view-only. Ask for an edit link to make changes.' })
     }
-    if (m.t === 'up' && typeof m.data === 'string') {
-      if (r.size + m.data.length > MAX_ROOM) return send(sock, { t: 'error', for: 'up', error: 'Workspace is over the storage limit.' })
-      const e = { seq: ++r.seq, data: m.data }
-      r.entries.push(e)
+    if (m.t === 'sub') {
+      if (!sock.subs.has(d)) subscribe(d)
+    } else if (m.t === 'unsub') {
+      sock.subs.delete(d)
+      r.docs.get(d)?.subs.delete(sock)
+    } else if (m.t === 'up' && typeof m.data === 'string') {
+      if (r.size + m.data.length > MAX_ROOM) return send(sock, { t: 'error', for: 'up', d, error: 'Workspace is over the storage limit.' })
+      const doc = docOf(r, id, d)
+      const seq = ++doc.seq
+      q.insert.run(id, d, seq, m.data)
+      doc.n++
       r.size += m.data.length
-      broadcast(r, sock, { t: 'up', ...e })
-      send(sock, { t: 'ack', seq: e.seq })
-      scheduleSave(id, r)
+      broadcast(doc.subs, sock, { t: 'up', d, seq, data: m.data })
+      send(sock, { t: 'ack', d, seq, n: doc.n })
     } else if (m.t === 'compact' && typeof m.data === 'string' && Number.isInteger(m.upTo)) {
-      // Replace entries up to `upTo` with one encrypted snapshot of the whole doc.
-      if (m.upTo > r.seq) return
-      const rest = r.entries.filter((e) => e.seq > m.upTo)
-      r.entries = [{ seq: m.upTo, data: m.data }, ...rest]
-      r.size = r.entries.reduce((s, e) => s + e.data.length, 0)
-      scheduleSave(id, r)
+      // Replace rows up to `upTo` with one encrypted snapshot of the whole document.
+      const doc = docOf(r, id, d)
+      if (m.upTo > doc.seq || m.upTo < 1 || Date.now() - doc.lastCompact < COMPACT_GAP_MS) return send(sock, { t: 'compacted', d, skipped: true })
+      doc.lastCompact = Date.now()
+      tx(() => { q.trim.run(id, d, m.upTo); q.insert.run(id, d, m.upTo, m.data) })
+      const info = q.docInfo.get(id, d)
+      doc.n = info.n
+      r.size = q.roomSize.get(id).size
+      send(sock, { t: 'compacted', d, n: doc.n })
+    } else if (m.t === 'drop' && d !== 'root') {
+      // a deleted page: remove its history (editors only on workspaces with view-only links)
+      if (r.pub) {
+        const verify = await verifier(r)
+        if (!(await verify('drop:' + d, m.sig))) return send(sock, { t: 'error', for: 'drop', d, error: 'This link is view-only.' })
+      }
+      q.drop.run(id, d)
+      r.docs.delete(d)
+      r.size = q.roomSize.get(id).size
+      broadcast(r.clients, null, { t: 'dropped', d })
     } else if (m.t === 'pres' && typeof m.data === 'string' && typeof m.tab === 'string') {
+      // presence and cursors: workspace-wide, rate limited per connection
+      const now = Date.now()
+      if (now - sock.pres.t > 1000) sock.pres = { t: now, n: 0 }
+      if (++sock.pres.n > PRES_PER_SEC) return
       sock.tab = m.tab.slice(0, 32)
-      broadcast(r, sock, { t: 'pres', tab: sock.tab, data: m.data })
+      broadcast(r.clients, sock, { t: 'pres', tab: sock.tab, data: m.data })
     } else if (m.t === 'claim' && typeof m.pub === 'string' && PUB_RE.test(m.pub)) {
       // First editor with keys turns on view-only links for this workspace (one time).
       if (r.pub && r.pub !== m.pub) return send(sock, { t: 'error', error: 'This workspace already has a different owner key.' })
@@ -234,16 +313,17 @@ wss.on('connection', async (sock, req) => {
         catch { return send(sock, { t: 'error', error: 'Invalid owner key.' }) }
         r.pub = m.pub
         r.verifyKey = null
-        scheduleSave(id, r)
-        broadcast(r, sock, { t: 'pub', pub: r.pub })
+        q.setPub.run(id, r.pub)
+        broadcast(r.clients, sock, { t: 'pub', pub: r.pub })
       }
     }
   }
 
   sock.on('close', () => {
     r.clients.delete(sock)
-    if (sock.tab) broadcast(r, sock, { t: 'leave', tab: sock.tab })
-    if (!r.clients.size && !r.timer) rooms.delete(id)
+    for (const d of sock.subs) r.docs.get(d)?.subs.delete(sock)
+    if (sock.tab) broadcast(r.clients, sock, { t: 'leave', tab: sock.tab })
+    releaseRoom(id, r)
   })
 })
 
@@ -256,4 +336,4 @@ setInterval(() => {
   }
 }, 30000)
 
-server.listen(PORT, () => console.log(`PeerPad sync server on :${PORT}  data=${DATA}`))
+server.listen(PORT, () => console.log(`PeerPad server on :${PORT}  data=${DATA}`))

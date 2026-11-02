@@ -6,30 +6,43 @@ import dynamic from 'next/dynamic'
 import type * as Y from 'yjs'
 import { useWorkspace } from './workspace'
 import { useY } from '@/lib/hooks.ts'
-import { applyTitle, isLegacy } from '@/lib/pages.ts'
-import { legacyBlocks, migratePage } from './convert'
+import { applyTitle, contentSource } from '@/lib/pages.ts'
+import { olderFormatBlocks, migratePage } from './convert'
 
 const Editor = dynamic(() => import('./Editor'), { ssr: false, loading: () => <EditorSkeleton /> })
 
 const EMOJI = '📄 📝 📌 📚 🗂️ 🗓️ ✅ 💡 🚀 🎯 🧪 🛠️ 📈 📊 🧭 🏠 🌱 🔥 ⭐ 🎨 🧠 💬 📦 🔒 🧾 🗺️ 🍳 🎵 ✈️ 🐞 🤝 👋 🏆 💼 🧩 ⚡'.split(' ')
+
+type Content = { kind: 'loading' } | { kind: 'live'; doc: Y.Doc } | { kind: 'preview'; blocks: any[] }
 
 export function PageView({ id }: { id: string }) {
   const w = useWorkspace()
   const { s } = w
   const page = s.pages.get(id)
   useY(page, false)
-  const [mode, setMode] = useState<'live' | 'converting' | { preview: any[] }>(() => (isLegacy(s.doc, page, id) ? 'converting' : 'live'))
+  const [content, setContent] = useState<Content>({ kind: 'loading' })
 
-  // First-version pages: editors convert them once; viewers see a read-only preview.
+  // Load this page's document. Pages in an older format are converted when an editor opens them;
+  // viewers see a read-only preview until then.
   useEffect(() => {
-    if (!isLegacy(s.doc, page, id)) { setMode('live'); return }
     let cancelled = false
+    let opened = false
+    setContent({ kind: 'loading' })
     ;(async () => {
-      if (w.readOnly) { const blocks = await legacyBlocks(s.doc, id); if (!cancelled) setMode({ preview: blocks }) }
-      else { await migratePage(s.doc, id); if (!cancelled) setMode('live') }
+      const src = contentSource(s.doc, s.pages.get(id), id)
+      if (src !== 'page' && w.readOnly) {
+        const blocks = await olderFormatBlocks(s, id)
+        if (!cancelled) setContent({ kind: 'preview', blocks })
+        return
+      }
+      opened = true
+      const doc = await s.net.openPage(id)
+      if (cancelled) return
+      if (src !== 'page') await migratePage(s, doc, id)
+      if (!cancelled) setContent({ kind: 'live', doc })
     })()
-    return () => { cancelled = true }
-  }, [id, w.readOnly, s.doc, page])
+    return () => { cancelled = true; if (opened) s.net.releasePage(id) }
+  }, [id, w.readOnly, s])
 
   if (!page) return null
   return (
@@ -41,9 +54,9 @@ export function PageView({ id }: { id: string }) {
       <PageIcon page={page} />
       <Title text={page.get('title') as Y.Text} />
       <div className="mt-3">
-        {mode === 'converting' ? <EditorSkeleton /> :
-          mode === 'live' ? <Editor key={id} session={s} pageId={id} me={w.me} readOnly={w.readOnly} theme={w.theme.resolved} /> :
-          <Editor key={id + ':preview'} session={s} pageId={id} me={w.me} readOnly theme={w.theme.resolved} initialContent={mode.preview} />}
+        {content.kind === 'loading' ? <EditorSkeleton /> :
+          content.kind === 'live' ? <Editor key={id} session={s} pageDoc={content.doc} pageId={id} me={w.me} readOnly={w.readOnly} theme={w.theme.resolved} /> :
+          <Editor key={id + ':preview'} session={s} pageId={id} me={w.me} readOnly theme={w.theme.resolved} initialContent={content.blocks} />}
       </div>
     </motion.article>
   )

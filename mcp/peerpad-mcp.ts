@@ -18,12 +18,12 @@ import { McpServer, createMcpHandler } from '@modelcontextprotocol/server'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { ServerBlockNoteEditor } from '@blocknote/server-util'
 import { getDocument } from '@blocknote/server-util/dom'
-import { serverTransport, loadSigner } from '../lib/remote.ts'
+import { serverConnection, loadSigner, type DocChannel } from '../lib/remote.ts'
 import { createServerSchema, parseRows } from '../lib/blocks.ts'
 import { markdownToBlocks, blocksToMarkdown, inlineText } from '../lib/markdown.ts'
 import {
-  pagesOf, fragmentOf, titleOf, iconOf, parentOf, childrenOf, ancestorsOf, descendantsOf,
-  addPage, removePages, applyTitle, isLegacy, legacyMarkdown,
+  pagesOf, fragmentOf, pageFragment, contentSource, PAGE_VERSION, titleOf, iconOf, parentOf, childrenOf, ancestorsOf,
+  descendantsOf, addPage, removePages, applyTitle, legacyMarkdown,
 } from '../lib/pages.ts'
 
 const CHARACTER_LIMIT = 25000
@@ -45,20 +45,22 @@ export function parseInvite(link: string | undefined): Invite {
 }
 
 /* ------------------------------------------------------------------ one connected workspace */
+// The root document (page list) is loaded on open; page documents are loaded when a tool needs them.
 export async function openWorkspace(cfg: Invite, aiName = 'AI assistant', aiColor = '#6e56cf') {
   const doc = new Y.Doc()
   const pages = pagesOf(doc)
   const meta = doc.getMap('meta')
   const signer = await loadSigner(cfg.pk, cfg.sk)
   const awareness = new Awareness(doc)
-  const remote = serverTransport(doc, cfg.ws, cfg.key, cfg.server, String(doc.clientID), {
-    onReady: () => remote.sendAwareness(encodeAwarenessUpdate(awareness, [doc.clientID])),
+  const conn = serverConnection(cfg.ws, cfg.key, cfg.server, String(doc.clientID), {
+    onConnect: () => conn.sendAwareness(encodeAwarenessUpdate(awareness, [doc.clientID])),
     onDisconnect: () => log('disconnected, retrying…'),
   }, signer)
+  const rootCh = conn.addDoc('root', doc)
   awareness.on('update', ({ added, updated, removed }: any, origin: unknown) => {
-    if (origin === 'local' && [...added, ...updated, ...removed].includes(doc.clientID)) remote.sendAwareness(encodeAwarenessUpdate(awareness, [doc.clientID]))
+    if (origin === 'local' && [...added, ...updated, ...removed].includes(doc.clientID)) conn.sendAwareness(encodeAwarenessUpdate(awareness, [doc.clientID]))
   })
-  const readOnly = () => remote.state.readOnly
+  const readOnly = () => conn.state.readOnly
   let idle: ReturnType<typeof setTimeout> | null = null
   const showActivity = (page: string | null) => {
     awareness.setLocalState({ user: { name: aiName, color: aiColor }, page, role: readOnly() ? 'view' : 'edit' })
@@ -66,27 +68,55 @@ export async function openWorkspace(cfg: Invite, aiName = 'AI assistant', aiColo
     idle = setTimeout(() => awareness.setLocalState(null), 30000) // leave "People here" when idle
     idle.unref?.()
   }
-  const ready = () => remote.whenReady()
+  const ready = () => rootCh.whenReady()
 
-  /** Run edits synchronously and wait until the sync server has stored them. */
-  async function write<T>(fn: () => T, pageId: string | null = null): Promise<T> {
-    await ready()
+  const pageDocs = new Map<string, Promise<{ doc: Y.Doc; ch: DocChannel }>>()
+  /** A page's document, loaded from the server on first use. */
+  function page(id: string) {
+    let p = pageDocs.get(id)
+    if (!p) {
+      p = (async () => {
+        const pd = new Y.Doc()
+        pd.clientID = doc.clientID
+        const ch = conn.addDoc(id, pd)
+        await ch.whenReady()
+        return { doc: pd, ch }
+      })()
+      p.catch(() => pageDocs.delete(id))
+      pageDocs.set(id, p)
+    }
+    return p
+  }
+
+  /** Run edits on one document synchronously and wait until the server has stored them. */
+  async function writeDoc<T>(target: Y.Doc, ch: DocChannel, fn: () => T, pageId: string | null): Promise<T> {
     if (readOnly()) throw new Error('This invite link is view-only, so changes are not allowed. Use a "Can edit" link (Share button in PeerPad) to let the AI edit.')
     const updates: Uint8Array[] = []
     const onUpdate = (u: Uint8Array, origin: unknown) => { if (origin !== 'srv') updates.push(u) }
-    doc.on('update', onUpdate)
+    target.on('update', onUpdate)
     let result: T
-    try { result = doc.transact(fn, 'mcp') } finally { doc.off('update', onUpdate) }
+    try { result = target.transact(fn, 'mcp') } finally { target.off('update', onUpdate) }
     if (updates.length) {
       await Promise.race([
-        remote.sendUpdate(Y.mergeUpdates(updates)),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('The sync server did not confirm the save within 10 seconds. Try again.')), 10000)),
+        ch.sendUpdate(Y.mergeUpdates(updates)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('The server did not confirm the save within 10 seconds. Try again.')), 10000)),
       ])
     }
     showActivity(pageId)
     return result!
   }
-  return { doc, pages, meta, remote, ready, write, readOnly, showActivity, close: () => remote.close() }
+  return {
+    doc, pages, meta, conn, ready, readOnly, showActivity, page,
+    /** edit the page list (titles, icons, structure) */
+    async write<T>(fn: () => T, pageId: string | null = null): Promise<T> { await ready(); return writeDoc(doc, rootCh, fn, pageId) },
+    /** edit a page's content */
+    async writePage<T>(id: string, fn: (pageDoc: Y.Doc) => T): Promise<T> {
+      await ready()
+      const { doc: pd, ch } = await page(id)
+      return writeDoc(pd, ch, () => fn(pd), id)
+    },
+    close: () => conn.close(),
+  }
 }
 type WS = Awaited<ReturnType<typeof openWorkspace>>
 
@@ -96,17 +126,26 @@ function getPage(W: WS, id: string) {
   if (!p) throw new Error(`No page with id "${id}". Call peerpad_list_pages or peerpad_search to find page ids.`)
   return p
 }
-/** Current blocks of a page (first-version pages are converted in memory). */
+/** Current blocks of a page, whatever its format (older formats are read in place). */
 async function pageBlocks(W: WS, id: string): Promise<any[]> {
   const page = getPage(W, id)
-  if (isLegacy(W.doc, page, id)) return markdownToBlocks(editor, legacyMarkdown(W.pages, page))
-  return editor.yXmlFragmentToBlocks(fragmentOf(W.doc, id))
+  const src = contentSource(W.doc, page, id)
+  if (src === 'root') return editor.yXmlFragmentToBlocks(fragmentOf(W.doc, id))
+  if (src === 'legacy') return markdownToBlocks(editor, legacyMarkdown(W.pages, page))
+  return editor.yXmlFragmentToBlocks(pageFragment((await W.page(id)).doc))
 }
-/** Write a page's blocks back; only the differences are applied, so teammates' edits elsewhere are kept. */
-function setBlocks(W: WS, id: string, blocks: any[]) {
+/** Write a page's blocks back; only the differences are applied, so teammates' edits elsewhere are kept.
+ * Pages in an older format are moved into their own document first. */
+async function setBlocks(W: WS, id: string, blocks: any[]) {
   const page = getPage(W, id)
-  editor.blocksToYXmlFragment(blocks, fragmentOf(W.doc, id))
-  if (page.get('v') !== 2) page.set('v', 2)
+  const src = contentSource(W.doc, page, id)
+  await W.writePage(id, (pd) => editor.blocksToYXmlFragment(blocks, pageFragment(pd)))
+  if (src !== 'page') {
+    await W.write(() => {
+      if (src === 'root') { const old = fragmentOf(W.doc, id); old.delete(0, old.length) }
+      page.set('v', PAGE_VERSION)
+    }, id)
+  }
 }
 function findBlock(blocks: any[], id: string): { list: any[]; index: number; block: any } | null {
   for (let i = 0; i < blocks.length; i++) {
@@ -259,11 +298,8 @@ export function createServerFor(W: WS) {
       await W.ready()
       if (parent_id) getPage(W, parent_id)
       const blocks = content_markdown.trim() ? await markdownToBlocks(editor, content_markdown) : []
-      const id = await W.write(() => {
-        const pid = addPage(W.pages, { parent: parent_id || null, title, icon })
-        if (blocks.length) editor.blocksToYXmlFragment(blocks, fragmentOf(W.doc, pid))
-        return pid
-      })
+      const id = await W.write(() => addPage(W.pages, { parent: parent_id || null, title, icon }))
+      if (blocks.length) await W.writePage(id, (pd) => editor.blocksToYXmlFragment(blocks, pageFragment(pd)))
       W.showActivity(id)
       return ok(`Created page "${title}" (id: ${id}) with ${blocks.length} block(s).`)
     })
@@ -286,7 +322,7 @@ export function createServerFor(W: WS) {
       if (after_block_id) { const f = mustFind(blocks, after_block_id); f.list.splice(f.index + 1, 0, ...added) }
       else if (position === 'start') blocks.unshift(...added)
       else blocks.push(...added)
-      await W.write(() => setBlocks(W, page_id, blocks), page_id)
+      await setBlocks(W, page_id, blocks)
       return ok(`Inserted ${added.length} block(s) into "${titleOf(W.pages, page_id)}". New block ids: ${added.map((b) => b.id).join(', ')}`)
     })
 
@@ -323,7 +359,7 @@ export function createServerFor(W: WS) {
           ...(chart_title !== undefined ? { title: chart_title } : {}),
         } }
       }
-      await W.write(() => setBlocks(W, page_id, blocks), page_id)
+      await setBlocks(W, page_id, blocks)
       return ok(`Updated block ${block_id}: ${(await blockMd(mustFind(await pageBlocks(W, page_id), block_id).block)).slice(0, 300)}`)
     })
 
@@ -338,7 +374,7 @@ export function createServerFor(W: WS) {
       const f = mustFind(blocks, block_id)
       const was = await blockMd(f.block)
       f.list.splice(f.index, 1)
-      await W.write(() => setBlocks(W, page_id, blocks), page_id)
+      await setBlocks(W, page_id, blocks)
       return ok(`Deleted block ${block_id} (was: ${was.slice(0, 120)})`)
     })
 
@@ -351,7 +387,7 @@ export function createServerFor(W: WS) {
       await W.ready()
       getPage(W, page_id)
       const blocks = await markdownToBlocks(editor, content_markdown)
-      await W.write(() => setBlocks(W, page_id, blocks.length ? blocks : [{ type: 'paragraph' }]), page_id)
+      await setBlocks(W, page_id, blocks.length ? blocks : [{ type: 'paragraph' }])
       return ok(`Replaced the content of "${titleOf(W.pages, page_id)}" with ${blocks.length} block(s).`)
     })
 
@@ -392,6 +428,7 @@ export function createServerFor(W: WS) {
       const all = descendantsOf(W.pages, page_id)
       const names = all.map((id) => titleOf(W.pages, id))
       await W.write(() => removePages(W.doc, all))
+      for (const id of all) W.conn.dropDoc(id)
       return ok(`Deleted ${all.length} page(s): ${names.join(', ')}`)
     })
 

@@ -8,7 +8,7 @@ Built with Next.js, React, TypeScript, Tailwind CSS, Motion and [BlockNote](http
 - Block editor with real formatting: headings, lists, to-dos, quotes, code, tables, images, files, callouts, **charts** (bar or line from an editable data table) and **table of contents**
 - `/` menu, drag handles, Markdown shortcuts, formatting toolbar, undo/redo
 - Real-time collaboration with live cursors and names; edits merge without conflicts
-- Nested pages with icons, breadcrumbs, and search over titles and page text (Ctrl+K)
+- Nested pages with icons, breadcrumbs, and search (Ctrl+K) over titles and the text of pages you have opened
 - Share links with **Can edit** or **Can view** access, enforced by the server
 - **AI agents**: connect Claude or Codex from the app, with edit or view access, and disconnect them any time
 - Light, dark and system themes; works on phones
@@ -29,11 +29,13 @@ Built with Next.js, React, TypeScript, Tailwind CSS, Motion and [BlockNote](http
 
 | Part | Tech |
 |---|---|
-| Documents | Yjs (conflict-free merging): a `pages` map plus one BlockNote document per page |
+| Documents | Yjs (conflict-free merging): a small root document (page list, titles) plus one document per page, loaded when the page is opened |
 | Editor | BlockNote (ProseMirror); custom blocks in `components/blocks` |
 | Presence and cursors | Yjs awareness, sent encrypted |
 | Files | Shrunk in the browser, encrypted, stored on the server |
-| Offline copy | IndexedDB in each browser |
+| Storage | SQLite on the server: each document's encrypted history is appended as rows; editors' browsers periodically replace long histories with one encrypted snapshot (the server can't, since it can't read them) |
+| Traffic | Edits are bundled per 40 ms burst; presence and cursors at most ~8 updates/s; you only receive edits for pages you have open |
+| Offline copy | IndexedDB in each browser (every page you've opened) |
 
 ## Project layout
 ```
@@ -47,25 +49,36 @@ mcp/          AI agents service (MCP): per-connection endpoints, connection regi
 ## Self-host
 
 ### DigitalOcean droplet or any VPS (automatic HTTPS)
+GitHub builds the PeerPad image on every push (`.github/workflows/docker.yml`) and publishes it to GitHub Container Registry, so your server only downloads it; nothing is compiled there.
+
 1. Point a domain or subdomain (DNS **A** record) at the server. No domain? Use `<your-ip-with-dashes>.sslip.io`.
 2. Install Docker: `curl -fsSL https://get.docker.com | sh`
-3. On a 1 GB server, add swap so the build has enough memory:
+3. If the GitHub repository is private, let the server download the image. Create a GitHub token with only the `read:packages` permission (Settings → Developer settings → Personal access tokens → Tokens (classic)), then:
    ```bash
-   fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab
+   echo <token> | docker login ghcr.io -u <github-username> --password-stdin
    ```
+   (Public repository: skip this, or make just the package public under the repository's **Packages**.)
 4. Start it:
    ```bash
    git clone https://github.com/JNHNG0205/peerpad.git && cd peerpad
    echo "DOMAIN=notes.example.com" > .env
-   docker compose up -d --build
+   docker compose pull && docker compose up -d
    ```
 5. Open `https://notes.example.com`, then **Share** to invite your team.
 
-Update later with `git pull && docker compose up -d --build`. Workspaces live in the `peerpad_peerpad-data` Docker volume; never run `docker compose down -v` unless you want to delete them.
+**Updating:** push to `main`, wait for the **Build image** run to finish (repository → Actions, a few minutes), then on the server:
+```bash
+cd ~/peerpad && git pull && docker compose pull && docker compose up -d
+```
+`git pull` only matters when `docker-compose.yml` or `Caddyfile` changed; the app itself comes from the image. A failed build never reaches the server: it keeps running the last good image.
+
+**Data:** workspaces live in the `peerpad_peerpad-data` Docker volume (`peerpad.db`, a SQLite database, plus encrypted files), AI connections in `peerpad_mcp-data`. Never run `docker compose down -v` unless you want to delete them. Workspaces saved by earlier versions are imported into the database automatically the first time they are opened.
+
+**Building on the server instead** (e.g. for a fork): `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`. On a 1 GB server, add 2 GB of swap first.
 
 ### Other hosts
 - **Render**: New → Blueprint → pick this repo (`render.yaml`, includes a persistent disk). This runs the app and server only; AI agents need the Docker setup or a second service (see below).
-- **Any Docker host**: `docker build -t peerpad . && docker run -p 8787:8787 -v peerpad:/data peerpad`, behind HTTPS.
+- **Any Docker host**: `docker run -p 8787:8787 -v peerpad:/data ghcr.io/jnhng0205/peerpad:latest`, behind HTTPS.
 
 ### Local development
 ```bash

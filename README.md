@@ -19,7 +19,22 @@ A peer-to-peer collaborative workspace for notes, docs and tasks. No server, no 
 | Same-device tabs | BroadcastChannel |
 | Persistence | IndexedDB |
 
-Note: sync needs at least one peer with the latest changes online. There is no always-on server.
+## Sync server (optional, recommended)
+`server/server.js` keeps an always-on copy of every workspace, so edits sync even when nobody else is online, and connections work on networks that block WebRTC.
+
+- **End-to-end encrypted**: browsers encrypt every change (AES-GCM, key derived from the invite key) before sending. The server stores and relays opaque blobs and never sees page content, names or keys. Workspace IDs are hashed too.
+- **Serves the app**: open the server's address and the app uses that server automatically; invite links point there.
+- Point any copy of the app at a server via workspace menu → **Sync server…**.
+
+```bash
+npm install && npm run build
+npm start        # http://localhost:8787  (PORT, DATA_DIR env vars)
+```
+
+### Deploy
+- **Render**: push this repo to GitHub → render.com → New → Blueprint → pick the repo (uses `render.yaml`, includes a 1 GB persistent disk).
+- **Any Docker host** (Fly.io, Railway, a VPS): `docker build -t peerpad . && docker run -p 8787:8787 -v peerpad:/data peerpad`
+- Put it behind HTTPS (Render/Fly/Railway do this for you). Keep `/data` on a persistent volume or workspaces are lost on redeploy.
 
 ## Run
 ```bash

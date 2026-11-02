@@ -35,15 +35,21 @@ const me = store.get('pp-me', null) || {
 store.set('pp-me', me)
 
 const params = () => new URLSearchParams(location.hash.slice(1))
-let { ws, key, createdHere } = (() => {
+let { ws, key, createdHere, srv } = (() => {
   const p = params()
-  if (p.get('ws') && p.get('key')) return { ws: p.get('ws'), key: p.get('key'), createdHere: !!p.get('new') }
   const recent = store.get('pp-recent', [])
-  if (recent[0]) return { ws: recent[0].ws, key: recent[0].key, createdHere: false }
-  return { ws: randToken(9), key: randToken(16), createdHere: true }
+  if (p.get('ws') && p.get('key')) {
+    const known = recent.find((w) => w.ws === p.get('ws'))
+    return { ws: p.get('ws'), key: p.get('key'), createdHere: !!p.get('new'), srv: p.get('srv') || known?.srv || null }
+  }
+  if (recent[0]) return { ws: recent[0].ws, key: recent[0].key, createdHere: false, srv: recent[0].srv || null }
+  return { ws: randToken(9), key: randToken(16), createdHere: true, srv: null }
 })()
+// The sync server that served this page is used automatically; "none" = explicitly disabled.
+let serverUrl = srv && srv !== 'none' ? srv : null
 const setHash = (page) => {
   const p = new URLSearchParams({ ws, key })
+  if (serverUrl) p.set('srv', serverUrl)
   if (page) p.set('p', page)
   history.replaceState(null, '', '#' + p.toString())
 }
@@ -53,10 +59,16 @@ addEventListener('hashchange', () => {
   if (p.get('ws') !== ws) location.reload()
   else if (p.get('p') && p.get('p') !== curId) openPage(p.get('p'))
 })
-const inviteLink = () => `${location.origin}${location.pathname}#ws=${ws}&key=${key}`
+const inviteLink = () => {
+  const p = new URLSearchParams({ ws, key })
+  if (serverUrl && !servedByServer) p.set('srv', serverUrl)
+  const base = servedByServer ? serverUrl.replace(/\/+$/, '') + '/' : location.href.split('#')[0]
+  return base + '#' + p.toString()
+}
+let servedByServer = false
 
 function newWorkspace() {
-  location.hash = `ws=${randToken(9)}&key=${randToken(16)}&new=1`
+  location.hash = `ws=${randToken(9)}&key=${randToken(16)}&new=1` + (serverUrl ? '&srv=' + encodeURIComponent(serverUrl) : '')
 }
 
 /* ---------------- doc ---------------- */
@@ -105,7 +117,7 @@ function seedWorkspace() {
       { type: 'todo', text: 'Try markdown: "# " heading, "- " list, "[] " to-do, "> " quote, "```" code', checked: false },
       { type: 'todo', text: 'Drag the ⋮⋮ handle to reorder blocks, Tab to indent', checked: true },
       { type: 'divider' },
-      { type: 'quote', text: 'At least one person must be online for others to sync. Each browser keeps a full offline copy.' },
+      { type: 'quote', text: 'With a sync server, edits reach teammates even when you are offline. Without one, at least one person must be online. Each browser keeps a full offline copy either way.' },
     ], '👋')
     createPage(home, 'Meeting notes', [
       { type: 'h3', text: 'Agenda' },
@@ -805,18 +817,19 @@ meta.observe(renderSidebarSoon)
 /* ---------------- workspaces ---------------- */
 function rememberWorkspace(name) {
   const list = store.get('pp-recent', []).filter((w) => w.ws !== ws)
-  list.unshift({ ws, key, name, ts: Date.now() })
+  list.unshift({ ws, key, name, srv: srv === 'none' ? 'none' : serverUrl, ts: Date.now() })
   store.set('pp-recent', list.slice(0, 12))
 }
 $('#wsSwitch').onclick = () => {
   const recent = store.get('pp-recent', [])
   openMenu($('#wsSwitch'), [
     { heading: 'Workspaces' },
-    ...recent.map((w) => ({ label: w.name || 'Workspace', icon: w.ws === ws ? '✓' : '', run: () => { if (w.ws !== ws) location.hash = `ws=${w.ws}&key=${w.key}` } })),
+    ...recent.map((w) => ({ label: w.name || 'Workspace', icon: w.ws === ws ? '✓' : '', run: () => { if (w.ws !== ws) location.hash = `ws=${w.ws}&key=${w.key}` + (w.srv ? '&srv=' + encodeURIComponent(w.srv) : '') } })),
     { sep: true },
     { label: 'Rename this workspace', icon: '✎', run: renameWorkspace },
     { label: 'New workspace', icon: '+', run: newWorkspace },
     { label: 'Join with invite link', icon: '⇢', run: joinDialog },
+    { label: 'Sync server…', icon: '☁', hint: serverUrl ? 'on' : 'off', run: serverDialog },
     { label: 'Change my name', icon: '☺', run: profileDialog },
   ])
 }
@@ -833,7 +846,9 @@ function joinDialog() {
       const hash = inp.value.includes('#') ? inp.value.split('#')[1] : inp.value
       const p = new URLSearchParams(hash)
       if (!p.get('ws') || !p.get('key')) { err.textContent = 'That link is missing the workspace ID or key. Ask for a fresh invite link.'; return false }
-      location.hash = `ws=${p.get('ws')}&key=${p.get('key')}`
+      const base = inp.value.includes('#') ? inp.value.split('#')[0] : ''
+      if (/^https?:/.test(base) && base.split('#')[0] !== location.href.split('#')[0]) { location.href = inp.value.trim(); return }
+      location.hash = `ws=${p.get('ws')}&key=${p.get('key')}` + (p.get('srv') ? '&srv=' + encodeURIComponent(p.get('srv')) : '')
     },
   }])
 }
@@ -843,6 +858,27 @@ function profileDialog() {
   const sw = h('div', { class: 'swatches' }, ...COLORS.map((c) => h('button', { class: 'swatch' + (c === color ? ' on' : ''), style: `background:${c}`, 'aria-label': c, onclick: (e) => { color = c; sw.querySelectorAll('.swatch').forEach((s) => s.classList.remove('on')); e.currentTarget.classList.add('on') } })))
   modal('Your name and color', h('div', { class: 'stack' }, h('label', { class: 'muted small', for: 'myName' }, 'Shown to teammates next to your cursor'), inp, sw), [{ label: 'Cancel' }, {
     label: 'Save', primary: true, run: () => { me.name = inp.value.trim() || me.name; me.color = color; store.set('pp-me', me); updatePresence() },
+  }])
+}
+function serverDialog() {
+  const inp = h('input', { class: 'field mono', id: 'srvUrl', placeholder: 'https://your-sync-server.example.com', value: serverUrl || '' })
+  const err = h('p', { class: 'error small' })
+  const st = net?.status()
+  modal('Sync server', h('div', { class: 'stack' },
+    h('p', { class: 'muted' }, 'A sync server keeps an always-on copy of this workspace, so edits reach teammates even when nobody else is online. Everything is encrypted in your browser with the workspace key; the server cannot read your pages.'),
+    h('label', { class: 'muted small', for: 'srvUrl' }, 'Server address (leave empty for peer-to-peer only)'),
+    inp, err,
+    st?.server ? h('p', { class: 'small' }, 'Status: ' + ({ connected: 'Connected', connecting: 'Connecting…', offline: 'Unreachable, retrying', error: st.serverError || 'Error' })[st.server]) : null),
+  [{ label: 'Cancel' }, {
+    label: 'Save', primary: true, run: () => {
+      const v = inp.value.trim().replace(/\/+$/, '')
+      if (v && !/^https?:\/\/[^\s]+$/.test(v)) { err.textContent = 'Enter a full address starting with https://'; return false }
+      serverUrl = v || null
+      srv = v || 'none'
+      rememberWorkspace(meta.get('name') || 'Shared workspace')
+      setHash(curId)
+      location.reload()
+    },
   }])
 }
 $('#shareBtn').onclick = () => {
@@ -885,7 +921,7 @@ function download(name, text) {
 /* ---------------- presence ---------------- */
 let net = null
 let focusBlockId = null
-function connected() { return net && (net.status().p2p > 0 || [...net.peers.values()].some((p) => p.via === 'tab')) }
+function connected() { const s = net?.status(); return s && (s.p2p > 0 || s.server === 'connected' || [...net.peers.values()].some((p) => p.via === 'tab')) }
 function setFocusBlock(id) { focusBlockId = id; updatePresence() }
 function updatePresence() { net?.setPresence({ name: me.name, color: me.color, page: curId, block: focusBlockId }) }
 function peersByPage() {
@@ -918,15 +954,34 @@ function renderPeople() {
   }
   const st = net.status()
   const n = net.peers.size
-  $('#net').className = 'net ' + (st.p2p ? 'on' : st.error ? 'err' : 'wait')
-  $('#net').textContent = st.p2p ? `Connected to ${st.p2p} peer${st.p2p > 1 ? 's' : ''}` : st.error ? 'Peer discovery failed. Working offline.' : n ? 'Connected (this browser only)' : 'Looking for peers… (edits saved offline)'
+  const online = n ? ` · ${n} other${n > 1 ? 's' : ''} online` : ''
+  let cls, text
+  if (st.server === 'connected') { cls = 'on'; text = 'Saved to sync server' + online }
+  else if (st.p2p) { cls = 'on'; text = `Connected to ${st.p2p} peer${st.p2p > 1 ? 's' : ''}` + (st.server ? ' · server unreachable' : '') }
+  else if (st.server === 'connecting') { cls = 'wait'; text = 'Connecting to sync server…' }
+  else if (st.server) { cls = 'err'; text = (st.serverError || 'Sync server unreachable') + ' Edits are saved offline.' }
+  else if (n) { cls = 'on'; text = 'Connected (this browser only)' }
+  else { cls = st.error ? 'err' : 'wait'; text = st.error ? 'Peer discovery failed. Working offline.' : 'Looking for peers… (edits saved offline)' }
+  $('#net').className = 'net ' + cls
+  $('#net').textContent = text
 }
 
 /* ---------------- boot ---------------- */
 ;(async () => {
   const hadLocal = await loadLocal(doc, ws)
   if (!hadLocal && createdHere && !pages.size) seedWorkspace()
-  net = connect(doc, ws, key)
+  // If this page was served by a PeerPad sync server, use it automatically.
+  if (location.protocol.startsWith('http')) {
+    try {
+      const r = await fetch(new URL('peerpad-health', location.href), { cache: 'no-store' })
+      if (r.ok && (await r.json()).peerpad) {
+        servedByServer = true
+        if (!serverUrl && srv !== 'none') serverUrl = new URL('.', location.href).href.replace(/\/+$/, '')
+      }
+    } catch {}
+  }
+  if (servedByServer && serverUrl === new URL('.', location.href).href.replace(/\/+$/, '')) setHash(params().get('p'))
+  net = connect(doc, ws, key, serverUrl)
   net.onChange(() => { renderPeople(); renderPeerMarks(); renderSidebarSoon() })
   renderPeople()
   setInterval(renderPeople, 5000)

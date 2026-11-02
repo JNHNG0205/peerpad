@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: peerpad
+    runtime: docker
+    plan: starter
+    disk:
+      name: peerpad-data
+      mountPath: /data
+      sizeGB: 1

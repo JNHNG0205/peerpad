@@ -1,5 +1,9 @@
 node_modules
-dist
+out
+.next
 data
 .env
 .env.*
+.scratch
+next-env.d.ts
+*.tsbuildinfo

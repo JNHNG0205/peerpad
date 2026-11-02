@@ -26,13 +26,14 @@ services:
     build: .
     profiles: ["mcp"]
     restart: unless-stopped
-    command: ["node", "mcp/peerpad-mcp.js"]
+    command: ["node", "mcp/peerpad-mcp.ts"]
     environment:
       - TRANSPORT=http
       - HOST=0.0.0.0
       - PORT=3333
       - MCP_ALLOWED_HOSTS=${DOMAIN}
       - PEERPAD_INVITE=${PEERPAD_INVITE:-}
+      - PEERPAD_SYNC_URL=http://peerpad:8787
       - MCP_TOKEN=${MCP_TOKEN:-}
       - PEERPAD_AI_NAME=${PEERPAD_AI_NAME:-AI assistant}
     depends_on:

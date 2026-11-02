@@ -1,5 +1,8 @@
 node_modules
-dist
+out
+.next
 data
 .git
 .env
+.env.*
+.scratch

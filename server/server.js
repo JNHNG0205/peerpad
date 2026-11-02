@@ -2,9 +2,9 @@
 // - Keeps an always-on copy of each workspace so edits sync even when no teammate is online.
 // - End-to-end encrypted: browsers encrypt every update with the workspace key before sending.
 //   The server only stores and relays opaque blobs; it never sees page content, names, or keys.
-// - Also serves the built app (dist/index.html), so one deploy = app + sync.
+// - Also serves the built web app (Next.js static export in out/), so one deploy = app + sync.
 //
-// Env: PORT (default 8787), DATA_DIR (default ./data), STATIC_DIR (default ../dist)
+// Env: PORT (default 8787), DATA_DIR (default ./data), STATIC_DIR (default ../out)
 import { createServer } from 'node:http'
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -15,7 +15,12 @@ import { WebSocketServer } from 'ws'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT) || 8787
 const DATA = path.resolve(process.env.DATA_DIR || path.join(here, '..', 'data'))
-const STATIC = path.resolve(process.env.STATIC_DIR || path.join(here, '..', 'dist'))
+const STATIC = path.resolve(process.env.STATIC_DIR || path.join(here, '..', 'out'))
+const TYPES = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json', '.txt': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
+  '.ico': 'image/x-icon', '.webp': 'image/webp', '.woff': 'font/woff', '.woff2': 'font/woff2', '.map': 'application/json',
+}
 const MAX_MSG = 10 * 1024 * 1024 // per message
 const MAX_ROOM = 100 * 1024 * 1024 // per workspace on disk
 const ROOM_RE = /^[a-f0-9]{64}$/
@@ -141,14 +146,28 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     return res.end(JSON.stringify({ peerpad: true, rooms: rooms.size }))
   }
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-    const file = path.join(STATIC, 'index.html')
-    if (existsSync(file)) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' })
-      return res.end(await readFile(file))
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    // static web app; anything unknown falls back to the app's index.html
+    let rel = decodeURIComponent(url.pathname)
+    if (rel.endsWith('/')) rel += 'index.html'
+    let file = path.resolve(STATIC, '.' + rel)
+    if (!file.startsWith(STATIC + path.sep)) return res.writeHead(400).end('Bad path')
+    if (!existsSync(file) || !(await stat(file)).isFile()) {
+      if (existsSync(file + '.html')) file += '.html'
+      else if (!path.extname(rel)) file = path.join(STATIC, 'index.html')
+      else return res.writeHead(404).end('Not found')
     }
-    res.writeHead(200, { 'content-type': 'text/plain' })
-    return res.end('PeerPad sync server is running. Build the app (npm run build) to serve it here.')
+    if (!existsSync(file)) {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      return res.end('PeerPad sync server is running. Build the app (npm run build) to serve it here.')
+    }
+    const immutable = rel.startsWith('/_next/static/')
+    res.writeHead(200, {
+      'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
+      'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'x-content-type-options': 'nosniff',
+    })
+    return res.end(req.method === 'HEAD' ? undefined : await readFile(file))
   }
   res.writeHead(404).end('Not found')
 })

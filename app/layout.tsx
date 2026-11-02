@@ -5,7 +5,7 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: 'PeerPad',
-  description: 'A collaborative workspace that syncs directly between browsers, end-to-end encrypted.',
+  description: 'A self-hosted, end-to-end encrypted collaborative workspace.',
 }
 export const viewport: Viewport = {
   width: 'device-width',

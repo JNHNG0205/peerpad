@@ -49,7 +49,7 @@ async function roomHash(ws: string, key: string): Promise<string> {
 
 /* ---------- write permission (ECDSA P-256) ----------
  * Edit links carry the private key (sk), view links only the public key (pk).
- * Every change is signed; the sync server and peers drop changes without a valid signature. */
+ * Every change is signed; the server drops changes without a valid signature. */
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' }
 const SIG = { name: 'ECDSA', hash: 'SHA-256' }
 export type Signer = {

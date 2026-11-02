@@ -70,7 +70,7 @@ function ShareDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
             <p><span className="font-medium">Want view-only links?</span>{' '}
               <span className="text-muted">{s.serverUrl
                 ? 'Turn on permissions for this workspace. Links shared before now become view-only, so send editors the new edit link afterwards.'
-                : 'This needs a sync server (workspace menu → Sync server), so the server can block changes from view-only links.'}</span>
+                : 'This needs a server (workspace menu → Server), so it can block changes from view-only links.'}</span>
             </p>
             {s.serverUrl && (
               <Button disabled={busy} onClick={async () => {
@@ -87,7 +87,7 @@ function ShareDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
       )}
       <p className="flex items-start gap-2 text-xs text-muted">
         <ShieldCheck size={14} className="mt-0.5 shrink-0 text-accent" />
-        Links contain the workspace key, so share them privately. Pages are encrypted with it in your browser; the sync server cannot read them.
+        Links contain the workspace key, so share them privately. Pages are encrypted with it in your browser; your PeerPad server cannot read them.
       </p>
     </Modal>
   )
@@ -109,10 +109,10 @@ function ServerDialog({ open, onClose }: { open: boolean; onClose: () => void })
     location.reload()
   }
   return (
-    <Modal open={open} onClose={onClose} title="Sync server"
+    <Modal open={open} onClose={onClose} title="Server"
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save and reconnect</Button></>}>
-      <p className="text-muted">A sync server keeps an always-on, encrypted copy of this workspace, so edits reach teammates even when nobody else is online.</p>
-      <label htmlFor="srv" className="text-xs font-medium text-muted">Server address (leave empty for peer-to-peer only)</label>
+      <p className="text-muted">Your PeerPad server stores this workspace (encrypted) and relays edits between teammates. It is set automatically when you open PeerPad from the server's address.</p>
+      <label htmlFor="srv" className="text-xs font-medium text-muted">Server address (empty: this device only)</label>
       <Field id="srv" value={value} onChange={(e) => { setValue(e.target.value); setErr('') }} placeholder="https://notes.example.com" className="font-mono text-xs" />
       {err && <p className="text-xs text-danger">{err}</p>}
       {st.server && <p className="text-xs text-muted">Status: {({ connected: 'Connected', connecting: 'Connecting…', offline: 'Unreachable, retrying', error: st.serverError || 'Error', closed: 'Closed' } as const)[st.server]}</p>}

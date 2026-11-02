@@ -215,16 +215,18 @@ function Shell({ s }: { s: Session }) {
 function Empty() {
   const w = useWorkspace()
   const st = w.s.net.status()
-  const syncing = st.server === 'connected' || st.p2p > 0
+  const syncing = st.server === 'connected'
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
       className="mx-auto flex max-w-md flex-col items-center gap-3 px-6 pt-[18vh] text-center">
       <div className="grid size-14 place-items-center rounded-2xl bg-accent-soft text-accent"><Users size={26} /></div>
-      <h1 className="text-2xl font-bold tracking-tight">{syncing ? 'No pages yet' : 'Waiting for teammates'}</h1>
+      <h1 className="text-2xl font-bold tracking-tight">{syncing || w.s.createdHere ? 'No pages yet' : st.server ? 'Connecting to the server…' : 'Not connected to a server'}</h1>
       <p className="text-sm text-muted">
-        {w.s.createdHere || syncing
+        {syncing || w.s.createdHere
           ? 'Create the first page of this workspace.'
-          : 'Pages appear once someone who has this workspace is online. You can also start writing now; your pages will merge with theirs.'}
+          : st.server
+            ? 'Pages appear as soon as the connection is ready. Anything you write meanwhile is kept and uploaded.'
+            : 'Open this workspace from your PeerPad server\'s address, or set the server in workspace menu → Server.'}
       </p>
       {!w.readOnly && <Button variant="primary" className="mt-2" onClick={() => w.createPage(null)}><FilePlus2 size={15} /> Create a page</Button>}
     </motion.div>

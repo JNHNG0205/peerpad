@@ -87,7 +87,7 @@ export function AgentsDialog({ open, onClose }: { open: boolean; onClose: () => 
 
   return (
     <Modal open={open} onClose={onClose} title="AI agents" width="max-w-xl">
-      {status === 'no-server' && <Notice>AI agents need a PeerPad server. Open this workspace from your server's address, or set one in workspace menu → Sync server.</Notice>}
+      {status === 'no-server' && <Notice>AI agents need a PeerPad server. Open this workspace from your server's address, or set one in workspace menu → Server.</Notice>}
       {status === 'disabled' && (
         <Notice>
           AI connections aren't turned on for this server yet. Whoever runs it can enable them with{' '}

@@ -31,7 +31,7 @@ export function Sidebar() {
       { label: 'New workspace', icon: <Plus />, onSelect: async () => { location.hash = await newWorkspaceHash(s.serverUrl) } },
       { label: 'Join with invite link', icon: <LogIn />, onSelect: () => w.dialog('join') },
       { label: 'AI agents', icon: <Sparkles />, onSelect: () => w.dialog('agents') },
-      { label: 'Sync server', icon: <Cloud />, hint: s.serverUrl ? 'On' : 'Off', onSelect: () => w.dialog('server') },
+      { label: 'Server', icon: <Cloud />, hint: s.serverUrl ? 'Connected' : 'Not set', onSelect: () => w.dialog('server') },
       { label: 'Your name and color', icon: <UserRound />, onSelect: () => w.dialog('profile') },
     ]
   }
@@ -169,14 +169,13 @@ function Status() {
   const n = s.net.peers().length
   const online = n ? ` · ${n} online` : ''
   let tone: 'ok' | 'wait' | 'err', text: string
-  if (st.server === 'connected') { tone = 'ok'; text = 'Saved to sync server' + online }
-  else if (st.p2p) { tone = 'ok'; text = `Connected to ${st.p2p} peer${st.p2p > 1 ? 's' : ''}` }
+  if (st.server === 'connected') { tone = 'ok'; text = 'Saved' + online }
   else if (st.server === 'connecting') { tone = 'wait'; text = 'Connecting…' }
-  else if (st.server) { tone = 'err'; text = st.serverError || 'Sync server unreachable' }
-  else if (n) { tone = 'ok'; text = 'Connected in this browser' }
-  else { tone = st.error ? 'err' : 'wait'; text = st.error ? 'Working offline' : 'Looking for peers…' }
+  else if (st.server === 'offline') { tone = 'err'; text = 'Offline · changes saved on this device' }
+  else if (st.server) { tone = 'err'; text = st.serverError || 'Server unreachable' }
+  else { tone = 'err'; text = 'No server · changes stay on this device' }
   return (
-    <div className="flex items-center gap-2 px-2.5 py-0.5 text-xs text-muted" title={st.server ? 'Changes are saved encrypted on your sync server' : 'Changes sync directly between browsers'}>
+    <div className="flex items-center gap-2 px-2.5 py-0.5 text-xs text-muted" title={st.server ? 'Changes are encrypted in your browser and saved on your PeerPad server' : 'Set a server in workspace menu → Server to share this workspace'}>
       <span className="relative flex size-2">
         {tone !== 'err' && <span className={cn('absolute inset-0 rounded-full opacity-60', tone === 'ok' ? 'bg-[#30a46c]' : 'animate-ping bg-[#d6a100]')} />}
         <span className={cn('relative size-2 rounded-full', tone === 'ok' ? 'bg-[#30a46c]' : tone === 'wait' ? 'bg-[#d6a100]' : 'bg-danger')} />

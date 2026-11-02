@@ -26,7 +26,6 @@ Built with Next.js, React, TypeScript, Tailwind CSS, Motion and [BlockNote](http
 - **Encryption happens in the browser.** Each workspace has a secret key that lives only in its invite links (after the `#`, which browsers never send to servers). Every edit and file is encrypted with it (AES-GCM) before it leaves the browser.
 - **The server stores and relays encrypted data.** It keeps an always-on copy of each workspace, so teammates get changes even when nobody else is online. It never sees page content, titles, names or keys.
 - **Permissions are enforced with signatures.** Edit links carry a private signing key; view links only the matching public key. The server rejects any change without a valid signature, so a view link can't edit, even with a modified app.
-- **Browsers also connect directly when they can** (WebRTC), which makes typing between teammates feel instant. The server remains the source of truth.
 
 | Part | Tech |
 |---|---|
@@ -72,7 +71,7 @@ Update later with `git pull && docker compose up -d --build`. Workspaces live in
 ```bash
 npm install
 npm run build && npm start   # app + server on http://localhost:8787
-npm run dev                  # UI with hot reload on http://localhost:3000 (set the server in workspace menu → Sync server)
+npm run dev                  # UI with hot reload on http://localhost:3000 (set the server in workspace menu → Server)
 ```
 
 ## Sharing

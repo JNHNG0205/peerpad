@@ -28,7 +28,7 @@ const toDataUrl = (bytes: Uint8Array, mime: string) => new Promise<string>((res)
 export async function uploadFile(file: File, assets: Assets): Promise<string> {
   const { bytes, mime } = await processImage(file)
   if (assets) return `peerpad-asset:${await assets.upload(bytes)}?type=${encodeURIComponent(mime)}`
-  if (bytes.length > MAX_INLINE) throw new Error('Files over 1.5 MB need a sync server (workspace menu → Sync server).')
+  if (bytes.length > MAX_INLINE) throw new Error('Files over 1.5 MB need a server (workspace menu → Server).')
   return toDataUrl(bytes, mime)
 }
 
